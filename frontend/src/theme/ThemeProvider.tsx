@@ -2,7 +2,7 @@ import { ConfigProvider } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PropsWithChildren } from 'react';
-import { getThemeConfig, type ResolvedThemeMode } from './themeConfig';
+import { getThemeConfig, brandGradient, type ResolvedThemeMode } from './themeConfig';
 import { ThemeModeContext } from './themeContext';
 import { getStoredThemeMode, setStoredThemeMode, type ThemeMode } from './themeStorage';
 
@@ -120,6 +120,31 @@ export const ThemeProvider = ({ children }: PropsWithChildren) => {
     const tooltipBg = themeConfig.token?.colorPrimary ?? '#884d5c';
     root.style.setProperty('--app-tooltip-bg', tooltipBg);
     root.style.setProperty('--app-tooltip-shadow', hexToRgba(tooltipBg, 0.3));
+    root.style.setProperty('--app-brand-gradient', brandGradient(resolvedMode));
+    root.style.setProperty(
+      '--app-brand-gradient-soft',
+      resolvedMode === 'dark'
+        ? 'linear-gradient(135deg, rgba(46,90,96,0.55) 0%, rgba(63,122,130,0.45) 50%, rgba(107,70,96,0.55) 100%)'
+        : 'linear-gradient(135deg, rgba(63,122,130,0.12) 0%, rgba(77,128,136,0.10) 50%, rgba(157,91,123,0.12) 100%)'
+    );
+    root.style.setProperty(
+      '--app-surface-glass',
+      resolvedMode === 'dark'
+        ? 'rgba(20, 27, 36, 0.72)'
+        : 'rgba(255, 255, 255, 0.72)'
+    );
+    root.style.setProperty(
+      '--app-surface-elev',
+      resolvedMode === 'dark'
+        ? '0 14px 40px -16px rgba(0, 0, 0, 0.65), 0 4px 12px -6px rgba(0, 0, 0, 0.45)'
+        : '0 14px 40px -18px rgba(31, 41, 51, 0.22), 0 4px 12px -6px rgba(31, 41, 51, 0.08)'
+    );
+    root.style.setProperty(
+      '--app-mesh-bg',
+      resolvedMode === 'dark'
+        ? 'radial-gradient(900px 520px at 12% -8%, rgba(95,160,168,0.18), transparent 60%), radial-gradient(700px 520px at 105% 4%, rgba(157,91,123,0.16), transparent 55%), radial-gradient(620px 420px at 50% 110%, rgba(95,160,168,0.10), transparent 60%)'
+        : 'radial-gradient(900px 520px at 12% -8%, rgba(63,122,130,0.16), transparent 60%), radial-gradient(720px 520px at 105% 4%, rgba(157,91,123,0.12), transparent 55%), radial-gradient(620px 420px at 50% 110%, rgba(220,200,180,0.20), transparent 60%)'
+    );
   }, [mode, resolvedMode, themeConfig]);
 
   useEffect(() => {

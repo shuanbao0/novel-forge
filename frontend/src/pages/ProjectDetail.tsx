@@ -320,9 +320,10 @@ export default function ProjectDetail() {
 
   return (
     <Layout style={{ minHeight: '100vh', height: '100vh', overflow: 'hidden' }}>
-      <Header style={{
-        background: token.colorPrimary,
-        padding: mobile ? '0 12px' : '0 24px',
+      <Header
+        className="app-top-header"
+        style={{
+        padding: mobile ? '0 12px' : '0 28px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -331,7 +332,6 @@ export default function ProjectDetail() {
         left: mobile ? 0 : (collapsed ? 60 : 220),
         right: 0,
         zIndex: 1000,
-        boxShadow: `0 2px 10px ${alphaColor(token.colorText, 0.16)}`,
         height: mobile ? 56 : 70,
         transition: 'left 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         overflow: 'hidden'
@@ -357,7 +357,7 @@ export default function ProjectDetail() {
           color: token.colorWhite,
           fontSize: mobile ? '16px' : '24px',
           fontWeight: 600,
-          textShadow: `0 2px 4px ${alphaColor(token.colorText, 0.2)}`,
+          textShadow: '0 2px 6px rgba(0, 0, 0, 0.18)',
           position: mobile ? 'static' : 'absolute',
           left: mobile ? 'auto' : '50%',
           transform: mobile ? 'none' : 'translateX(-50%)',
@@ -390,61 +390,21 @@ export default function ProjectDetail() {
         )}
 
         {!mobile && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', zIndex: 1 }}>
-            <div style={{ display: 'flex', gap: '16px' }}>
-              {[
-                { label: '大纲', value: outlines.length, unit: '条' },
-                { label: '角色', value: characters.length, unit: '个' },
-                { label: '章节', value: chapters.length, unit: '章' },
-                { label: '已写', value: currentProject.current_words, unit: '字' },
-              ].map((item, index) => (
-                <div
-                  key={index}
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    backdropFilter: 'blur(4px)',
-                    borderRadius: '28px',
-                    minWidth: '56px',
-                    height: '56px',
-                    padding: '0 12px',
-                    boxShadow: `inset 0 0 15px ${alphaColor(token.colorWhite, 0.15)}, 0 4px 10px ${alphaColor(token.colorText, 0.1)}`,
-                    cursor: 'default',
-                    transition: 'all 0.3s ease',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.transform = 'translateY(-3px) scale(1.02)';
-                    e.currentTarget.style.boxShadow = `inset 0 0 20px ${alphaColor(token.colorWhite, 0.25)}, 0 8px 16px ${alphaColor(token.colorText, 0.15)}`;
-                    e.currentTarget.style.border = `1px solid ${alphaColor(token.colorWhite, 0.1)}`;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.transform = 'translateY(0) scale(1)';
-                    e.currentTarget.style.boxShadow = `inset 0 0 15px ${alphaColor(token.colorWhite, 0.15)}, 0 4px 10px ${alphaColor(token.colorText, 0.1)}`;
-                  }}
-                >
-                  <span style={{
-                    fontSize: '11px',
-                    color: alphaColor(token.colorWhite, 0.9),
-                    marginBottom: '2px',
-                    lineHeight: 1
-                  }}>
-                    {item.label}
-                  </span>
-                  <span style={{
-                    fontSize: '15px',
-                    fontWeight: '600',
-                    color: token.colorWhite,
-                    lineHeight: 1,
-                    fontFamily: 'Monaco, monospace'
-                  }}>
-                    {item.value > 10000 ? (item.value / 10000).toFixed(1) + 'w' : item.value}
-                    <span style={{ fontSize: '10px', marginLeft: '2px', opacity: 0.8 }}>{item.unit}</span>
-                  </span>
-                </div>
-              ))}
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, zIndex: 1 }}>
+            {[
+              { label: '大纲', value: outlines.length, unit: '条' },
+              { label: '角色', value: characters.length, unit: '个' },
+              { label: '章节', value: chapters.length, unit: '章' },
+              { label: '已写', value: currentProject.current_words, unit: '字' },
+            ].map((item) => (
+              <div key={item.label} className="app-stat-pill">
+                <span className="app-stat-pill__label">{item.label}</span>
+                <span className="app-stat-pill__value">
+                  {item.value > 10000 ? (item.value / 10000).toFixed(1) + 'w' : item.value}
+                  <span className="app-stat-pill__unit">{item.unit}</span>
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </Header>
@@ -455,15 +415,16 @@ export default function ProjectDetail() {
             title={
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{
-                  width: 30,
-                  height: 30,
-                  background: token.colorPrimary,
-                  borderRadius: 8,
+                  width: 32,
+                  height: 32,
+                  background: 'var(--app-brand-gradient)',
+                  borderRadius: 10,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: token.colorWhite,
+                  color: '#fff',
                   fontSize: 16,
+                  boxShadow: '0 6px 14px -6px color-mix(in srgb, var(--ant-color-primary) 60%, transparent)',
                 }}>
                   <BookOutlined />
                 </div>
@@ -512,15 +473,17 @@ export default function ProjectDetail() {
               display: 'flex',
               flexDirection: 'column'
             }}>
-              <div style={{
+              <div
+                className="app-top-header"
+                style={{
                 height: 70,
                 display: 'flex',
                 alignItems: 'center',
-                padding: collapsed ? 0 : '0 12px',
-                background: token.colorPrimary,
+                padding: collapsed ? 0 : '0 14px',
                 flexShrink: 0,
                 justifyContent: collapsed ? 'center' : 'space-between',
-                gap: 8
+                gap: 8,
+                position: 'relative',
               }}>
                 {collapsed ? (
                   <Button
@@ -663,9 +626,10 @@ export default function ProjectDetail() {
           >
             <div style={{
               background: token.colorBgContainer,
-              padding: mobile ? 12 : 24,
-              borderRadius: mobile ? '8px' : '12px',
-              boxShadow: `0 8px 24px ${alphaColor(token.colorText, 0.08)}`,
+              padding: mobile ? 14 : 24,
+              borderRadius: mobile ? 12 : 16,
+              boxShadow: 'var(--app-surface-elev)',
+              border: `1px solid ${token.colorBorderSecondary}`,
               height: '100%',
               overflow: 'hidden',
               display: 'flex',

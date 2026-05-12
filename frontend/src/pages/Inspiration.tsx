@@ -1102,12 +1102,12 @@ const Inspiration: React.FC = () => {
       </style>
 
       {/* 顶部标题栏 - 固定不滚动 */}
-      <div style={{
+      <div
+        className="app-top-header"
+        style={{
         position: 'sticky',
         top: 0,
         zIndex: 100,
-        background: token.colorPrimary,
-        boxShadow: `0 6px 20px color-mix(in srgb, ${token.colorPrimary} 30%, transparent)`,
       }}>
         <div style={{
           maxWidth: 1200,

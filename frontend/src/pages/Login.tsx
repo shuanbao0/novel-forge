@@ -783,7 +783,9 @@ export default function Login() {
 
   return (
     <>
-      <Layout style={{ minHeight: '100vh', background: token.colorBgLayout }}>
+      <Layout style={{ minHeight: '100vh', background: token.colorBgLayout, position: 'relative', overflow: 'hidden' }}>
+        <div className="app-orb app-orb--primary app-orb--anim" style={{ width: 480, height: 480, top: -160, left: -120, opacity: 0.28 }} />
+        <div className="app-orb app-orb--accent app-orb--anim" style={{ width: 380, height: 380, bottom: -120, right: -100, opacity: 0.22, animationDelay: '-7s' }} />
         <div
           style={{
             position: 'fixed',
@@ -792,14 +794,16 @@ export default function Login() {
             zIndex: 10,
             padding: '8px 10px',
             borderRadius: 12,
-            background: alphaColor(token.colorBgContainer, 0.9),
+            background: alphaColor(token.colorBgContainer, 0.78),
             border: `1px solid ${token.colorBorderSecondary}`,
-            backdropFilter: 'blur(6px)',
+            backdropFilter: 'saturate(180%) blur(16px)',
+            WebkitBackdropFilter: 'saturate(180%) blur(16px)',
+            boxShadow: '0 8px 24px -12px rgba(0,0,0,0.18)',
           }}
         >
           <ThemeSwitch size="small" />
         </div>
-        <Row style={{ minHeight: '100vh' }}>
+        <Row style={{ minHeight: '100vh', position: 'relative', zIndex: 1 }}>
           <Col xs={0} lg={11}>
             <section
               style={{
@@ -810,16 +814,18 @@ export default function Login() {
                 justifyContent: 'space-between',
                 position: 'relative',
                 overflow: 'hidden',
-                backgroundColor: alphaColor(token.colorBgContainer, 0.78),
-                backgroundImage: `linear-gradient(${alphaColor(token.colorTextSecondary, 0.06)} 1px, transparent 1px), linear-gradient(90deg, ${alphaColor(token.colorTextSecondary, 0.06)} 1px, transparent 1px)`,
-                backgroundSize: '68px 68px',
+                backgroundColor: alphaColor(token.colorBgContainer, 0.66),
+                backdropFilter: 'saturate(160%) blur(12px)',
+                WebkitBackdropFilter: 'saturate(160%) blur(12px)',
+                backgroundImage: `linear-gradient(${alphaColor(token.colorTextSecondary, 0.05)} 1px, transparent 1px), linear-gradient(90deg, ${alphaColor(token.colorTextSecondary, 0.05)} 1px, transparent 1px)`,
+                backgroundSize: '72px 72px',
               }}
             >
               <div
                 style={{
                   position: 'absolute',
                   inset: 0,
-                  background: `radial-gradient(circle at 25% 20%, ${alphaColor(token.colorPrimary, 0.12)} 0%, transparent 50%)`,
+                  background: `radial-gradient(circle at 18% 16%, ${alphaColor(token.colorPrimary, 0.18)} 0%, transparent 55%), radial-gradient(circle at 92% 86%, rgba(217, 70, 239, 0.14) 0%, transparent 56%)`,
                   pointerEvents: 'none',
                 }}
               />
@@ -838,14 +844,14 @@ export default function Login() {
                 <Space align="center" size={14}>
                   <div
                     style={{
-                      width: 46,
-                      height: 46,
+                      width: 48,
+                      height: 48,
                       borderRadius: 14,
-                      background: `linear-gradient(135deg, ${token.colorPrimary} 0%, ${alphaColor(token.colorPrimary, 0.7)} 100%)`,
+                      background: 'var(--app-brand-gradient)',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      boxShadow: primaryButtonShadow,
+                      boxShadow: '0 14px 28px -10px color-mix(in srgb, var(--ant-color-primary) 60%, transparent)',
                     }}
                   >
                     <img
@@ -854,7 +860,7 @@ export default function Login() {
                       style={{ width: 26, height: 26, filter: 'brightness(0) invert(1)' }}
                     />
                   </div>
-                  <Title level={3} style={{ margin: 0, color: token.colorText }}>
+                  <Title level={3} style={{ margin: 0, color: token.colorText, fontWeight: 700, letterSpacing: '0.01em' }}>
                     novel-forge
                   </Title>
                 </Space>
@@ -904,11 +910,16 @@ export default function Login() {
                         <Card
                           size="small"
                           bordered={false}
+                          className="app-hover-lift"
                           style={{
                             height: '100%',
-                            minHeight: 120,
+                            minHeight: 124,
                             borderRadius: 16,
-                            background: alphaColor(token.colorBgContainer, 0.9),
+                            background: alphaColor(token.colorBgContainer, 0.78),
+                            backdropFilter: 'saturate(160%) blur(8px)',
+                            WebkitBackdropFilter: 'saturate(160%) blur(8px)',
+                            border: `1px solid ${alphaColor(token.colorBorder, 0.5)}`,
+                            boxShadow: '0 8px 24px -16px rgba(31, 41, 51, 0.18)',
                           }}
                           bodyStyle={{ padding: 16 }}
                         >
@@ -960,12 +971,20 @@ export default function Login() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 padding: '48px min(7vw, 72px)',
-                background: token.colorBgLayout,
+                background: 'transparent',
               }}
             >
-              <div style={{ width: '100%', maxWidth: 520 }}>
+              <div
+                className="app-glass"
+                style={{
+                  width: '100%',
+                  maxWidth: 520,
+                  padding: '36px 36px 32px',
+                  borderRadius: 20,
+                }}
+              >
                 <Space direction="vertical" size={4}>
-                  <Title level={2} style={{ marginBottom: 0, fontWeight: 700, color: token.colorText }}>
+                  <Title level={2} style={{ marginBottom: 0, fontWeight: 700, color: token.colorText, letterSpacing: '0.01em' }}>
                     欢迎回来
                   </Title>
                   <Paragraph style={{ marginBottom: 0, color: token.colorTextSecondary }}>

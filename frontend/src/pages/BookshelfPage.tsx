@@ -145,19 +145,19 @@ export default function BookshelfPage({
     <div>
       <Card
         variant="borderless"
+        className="app-brand-surface"
         style={{
-          marginBottom: isMobile ? 12 : 16,
-          borderRadius: isMobile ? 14 : 18,
-          background: `linear-gradient(135deg, ${token.colorPrimary} 0%, ${token.colorPrimaryHover} 100%)`,
-          boxShadow: token.boxShadowSecondary,
+          marginBottom: isMobile ? 14 : 20,
+          borderRadius: isMobile ? 14 : 20,
+          boxShadow: '0 20px 50px -22px color-mix(in srgb, var(--ant-color-primary) 55%, transparent), 0 4px 12px -6px rgba(0, 0, 0, 0.12)',
           border: 'none',
           position: 'relative',
           overflow: 'hidden',
         }}
-        styles={{ body: { padding: isMobile ? '14px 14px' : '16px 18px' } }}
+        styles={{ body: { padding: isMobile ? '16px 16px' : '22px 24px' } }}
       >
-        <div style={{ position: 'absolute', top: -44, right: -44, width: 150, height: 150, borderRadius: '50%', background: token.colorWhite, opacity: 0.1, pointerEvents: 'none' }} />
-        <div style={{ position: 'absolute', bottom: -36, left: '26%', width: 100, height: 100, borderRadius: '50%', background: token.colorWhite, opacity: 0.06, pointerEvents: 'none' }} />
+        <div style={{ position: 'absolute', top: -60, right: -40, width: 200, height: 200, borderRadius: '50%', background: 'rgba(255,255,255,0.16)', filter: 'blur(2px)', pointerEvents: 'none' }} />
+        <div style={{ position: 'absolute', bottom: -50, left: '22%', width: 140, height: 140, borderRadius: '50%', background: 'rgba(255,255,255,0.10)', pointerEvents: 'none' }} />
 
         <div
           style={{
@@ -173,27 +173,29 @@ export default function BookshelfPage({
           <div>
             <div
               style={{
-                fontSize: isMobile ? 18 : 22,
+                fontSize: isMobile ? 20 : 26,
                 fontWeight: 700,
-                color: token.colorWhite,
-                lineHeight: 1.3,
+                color: '#ffffff',
+                lineHeight: 1.25,
                 display: 'flex',
                 alignItems: 'center',
-                gap: 8,
-                textShadow: `0 2px 4px ${alphaColor(token.colorText, 0.2)}`,
+                gap: 10,
+                letterSpacing: '0.02em',
+                textShadow: '0 2px 10px rgba(0, 0, 0, 0.18)',
               }}
             >
-              <BookOutlined style={{ opacity: 0.92 }} />
+              <BookOutlined style={{ opacity: 0.94 }} />
               我的书架
             </div>
             <div
               style={{
-                marginTop: 4,
-                fontSize: isMobile ? 12 : 13,
-                color: alphaColor(token.colorWhite, 0.9),
+                marginTop: 6,
+                fontSize: isMobile ? 12 : 14,
+                color: 'rgba(255, 255, 255, 0.86)',
+                letterSpacing: '0.01em',
               }}
             >
-              点击书本即可进入项目，统一查看进度、字数与状态。
+              点击书本进入项目 · 一处查看创作进度、字数与状态
             </div>
           </div>
 
@@ -201,7 +203,13 @@ export default function BookshelfPage({
             <Button
               icon={<UploadOutlined />}
               onClick={onOpenImportModal}
-              style={{ borderRadius: 10 }}
+              style={{
+                borderRadius: 10,
+                background: 'rgba(255, 255, 255, 0.16)',
+                borderColor: 'rgba(255, 255, 255, 0.28)',
+                color: '#fff',
+                backdropFilter: 'blur(8px)',
+              }}
             >
               导入项目
             </Button>
@@ -209,7 +217,13 @@ export default function BookshelfPage({
               icon={<DownloadOutlined />}
               onClick={onOpenExportModal}
               disabled={exportableProjectsCount === 0}
-              style={{ borderRadius: 10 }}
+              style={{
+                borderRadius: 10,
+                background: exportableProjectsCount === 0 ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.16)',
+                borderColor: 'rgba(255, 255, 255, 0.28)',
+                color: '#fff',
+                backdropFilter: 'blur(8px)',
+              }}
             >
               导出项目
             </Button>

@@ -511,15 +511,17 @@ export default function ProjectList() {
           boxShadow: `4px 0 16px ${alphaColor(token.colorText, 0.06)}`,
           zIndex: 1000
         }}>
-          <div style={{
+          <div
+            className="app-top-header"
+            style={{
             height: 70,
             display: 'flex',
             alignItems: 'center',
-            padding: collapsed ? 0 : '0 12px',
-            background: token.colorPrimary,
+            padding: collapsed ? 0 : '0 14px',
             flexShrink: 0,
             justifyContent: collapsed ? 'center' : 'space-between',
-            gap: 8
+            gap: 8,
+            position: 'relative',
           }}>
             {collapsed ? (
               <Button
@@ -632,9 +634,10 @@ export default function ProjectList() {
         </div>
       )}
 
-      <div style={{
-        background: token.colorPrimary,
-        padding: isMobile ? '0 12px' : '0 24px',
+      <div
+        className="app-top-header"
+        style={{
+        padding: isMobile ? '0 12px' : '0 28px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -643,7 +646,6 @@ export default function ProjectList() {
         left: isMobile ? 0 : desktopSiderWidth,
         right: 0,
         zIndex: 1000,
-        boxShadow: `0 2px 10px ${alphaColor(token.colorText, 0.16)}`,
         height: headerHeight,
         flexShrink: 0,
         transition: 'left 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -670,7 +672,7 @@ export default function ProjectList() {
               color: token.colorWhite,
               fontSize: 16,
               fontWeight: 600,
-              textShadow: `0 2px 4px ${alphaColor(token.colorText, 0.2)}`,
+              textShadow: '0 2px 6px rgba(0, 0, 0, 0.18)',
               flex: 1,
               textAlign: 'center',
               whiteSpace: 'nowrap',
@@ -692,7 +694,7 @@ export default function ProjectList() {
               color: token.colorWhite,
               fontSize: '24px',
               fontWeight: 600,
-              textShadow: `0 2px 4px ${alphaColor(token.colorText, 0.2)}`,
+              textShadow: '0 2px 6px rgba(0, 0, 0, 0.18)',
               position: 'absolute',
               left: '50%',
               transform: 'translateX(-50%)',
@@ -705,52 +707,21 @@ export default function ProjectList() {
             </h2>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 16, zIndex: 1 }}>
-              {activeView === 'projects' && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
-                  {projects.length > 0 && (
-                    <div style={{ display: 'flex', gap: '16px' }}>
-                      {[
-                        { label: '创作中', value: activeProjects, unit: '本' },
-                        { label: '已完结', value: completedProjects, unit: '本' },
-                        { label: '总字数', value: totalWords, unit: '字' },
-                      ].map((item, index) => (
-                        <div
-                          key={index}
-                          style={{
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            backdropFilter: 'blur(4px)',
-                            borderRadius: '28px',
-                            minWidth: '56px',
-                            height: '56px',
-                            padding: '0 12px',
-                            boxShadow: `inset 0 0 15px ${alphaColor(token.colorWhite, 0.15)}, 0 4px 10px ${alphaColor(token.colorText, 0.1)}`,
-                            cursor: 'default',
-                            transition: 'transform 0.3s ease, box-shadow 0.3s ease',
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.transform = 'translateY(-3px) scale(1.02)';
-                            e.currentTarget.style.boxShadow = `inset 0 0 20px ${alphaColor(token.colorWhite, 0.25)}, 0 8px 16px ${alphaColor(token.colorText, 0.15)}`;
-                            e.currentTarget.style.border = `1px solid ${alphaColor(token.colorWhite, 0.1)}`;
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.transform = 'translateY(0) scale(1)';
-                            e.currentTarget.style.boxShadow = `inset 0 0 15px ${alphaColor(token.colorWhite, 0.15)}, 0 4px 10px ${alphaColor(token.colorText, 0.1)}`;
-                          }}
-                        >
-                          <span style={{ fontSize: '11px', color: alphaColor(token.colorWhite, 0.9), marginBottom: '2px', lineHeight: 1 }}>
-                            {item.label}
-                          </span>
-                          <span style={{ fontSize: '15px', fontWeight: '600', color: token.colorWhite, lineHeight: 1, fontFamily: 'Monaco, monospace' }}>
-                            {item.label === '总字数' ? formatWordCount(item.value) : item.value}
-                            {item.unit && <span style={{ fontSize: '10px', marginLeft: '2px', opacity: 0.8 }}>{item.unit}</span>}
-                          </span>
-                        </div>
-                      ))}
+              {activeView === 'projects' && projects.length > 0 && (
+                <div style={{ display: 'flex', gap: 12 }}>
+                  {[
+                    { label: '创作中', value: activeProjects, unit: '本' },
+                    { label: '已完结', value: completedProjects, unit: '本' },
+                    { label: '总字数', value: totalWords, unit: '字', isWordCount: true },
+                  ].map((item) => (
+                    <div key={item.label} className="app-stat-pill">
+                      <span className="app-stat-pill__label">{item.label}</span>
+                      <span className="app-stat-pill__value">
+                        {item.isWordCount ? formatWordCount(item.value) : item.value}
+                        <span className="app-stat-pill__unit">{item.unit}</span>
+                      </span>
                     </div>
-                  )}
+                  ))}
                 </div>
               )}
             </div>
@@ -763,15 +734,16 @@ export default function ProjectList() {
           title={
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{
-                width: 30,
-                height: 30,
-                background: token.colorPrimary,
-                borderRadius: 8,
+                width: 32,
+                height: 32,
+                background: 'var(--app-brand-gradient)',
+                borderRadius: 10,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: token.colorWhite,
+                color: '#fff',
                 fontSize: 16,
+                boxShadow: '0 6px 14px -6px color-mix(in srgb, var(--ant-color-primary) 60%, transparent)',
               }}>
                 <BookOutlined />
               </div>
@@ -829,11 +801,13 @@ export default function ProjectList() {
             flex: 1,
             overflowY: 'auto',
             padding: activeView === 'projects'
-              ? (isMobile ? '20px 16px 70px' : '24px 24px 70px')
+              ? (isMobile ? '20px 16px 70px' : '28px 28px 80px')
               : 0,
             background: activeView === 'projects'
-              ? `linear-gradient(180deg, ${alphaColor(token.colorPrimary, 0.04)} 0%, ${token.colorBgLayout} 26%)`
+              ? 'transparent'
               : token.colorBgLayout,
+            backgroundImage: activeView === 'projects' ? 'var(--app-mesh-bg)' : 'none',
+            backgroundAttachment: 'fixed',
           }}
         >
           {activeView === 'settings' && <SettingsPage />}
