@@ -585,6 +585,20 @@ export const outlineApi = {
   // 批量展开大纲
   batchExpandOutlines: (data: BatchOutlineExpansionRequest) =>
     api.post<unknown, BatchOutlineExpansionResponse>('/outlines/batch-expand', data),
+
+  // AI 生成卷级契约草稿 (SSE)
+  suggestVolumeBrief: (
+    outlineId: string,
+    hint: string | undefined,
+    options?: SSEClientOptions,
+  ) => ssePost<{
+    brief: {
+      volume_goal: string;
+      pacing: string;
+      anti_patterns: string[];
+      required_tropes: string[];
+    };
+  }>(`/api/outlines/${outlineId}/suggest-brief-stream`, { hint: hint ?? '' }, options),
 };
 
 export const characterApi = {

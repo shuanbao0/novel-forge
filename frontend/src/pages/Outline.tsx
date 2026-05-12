@@ -2358,6 +2358,7 @@ export default function Outline() {
             open
             initialValue={(target.creative_brief as Record<string, unknown> | null | undefined) ?? null}
             title={`卷级契约 - ${target.title}`}
+            targetId={target.id}
             onClose={() => setBriefTargetOutlineId(null)}
             onSave={async (brief) => {
               await outlineApi.updateOutline(target.id, { creative_brief: brief });

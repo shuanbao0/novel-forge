@@ -12,13 +12,16 @@ import {
   Drawer,
   Form,
   Input,
+  Popover,
+  Progress,
   Select,
   Space,
   Tag,
   Typography,
   message,
 } from 'antd';
-import { PlusOutlined, SaveOutlined } from '@ant-design/icons';
+import { PlusOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { outlineApi } from '../services/api';
 
 const { Paragraph, Text } = Typography;
 
@@ -31,6 +34,8 @@ interface BriefEditorProps {
   onClose: () => void;
   onSave: (brief: Record<string, unknown>) => Promise<void> | void;
   title?: string;
+  /** mode='volume' 时传入 outline.id 可启用 AI 生成 */
+  targetId?: string;
 }
 
 interface ListEditorProps {
@@ -95,10 +100,16 @@ export default function BriefEditor({
   onClose,
   onSave,
   title,
+  targetId,
 }: BriefEditorProps) {
   const defaultBrief = mode === 'volume' ? VOLUME_DEFAULTS : CHAPTER_DEFAULTS;
   const [brief, setBrief] = useState<Record<string, unknown>>(defaultBrief);
   const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [genProgress, setGenProgress] = useState(0);
+  const [genMessage, setGenMessage] = useState('');
+  const [hint, setHint] = useState('');
+  const [hintOpen, setHintOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -107,6 +118,9 @@ export default function BriefEditor({
     } else {
       setBrief({ ...defaultBrief });
     }
+    setGenProgress(0);
+    setGenMessage('');
+    setHint('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialValue, mode]);
 
@@ -124,6 +138,65 @@ export default function BriefEditor({
     }
   };
 
+  const aiEnabled = mode === 'volume' && !!targetId;
+
+  const handleAIGenerate = async () => {
+    if (!aiEnabled || !targetId) return;
+    setHintOpen(false);
+    setGenerating(true);
+    setGenProgress(0);
+    setGenMessage('准备生成...');
+    try {
+      const result = await outlineApi.suggestVolumeBrief(targetId, hint, {
+        onProgress: (msg, progress) => {
+          setGenMessage(msg);
+          setGenProgress(progress);
+        },
+        onError: (err) => message.error(err || 'AI 生成失败'),
+      });
+      if (result?.brief) {
+        setBrief({ ...VOLUME_DEFAULTS, ...result.brief });
+        message.success('已生成草稿,请审阅后点保存');
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const aiButton = aiEnabled ? (
+    <Popover
+      trigger="click"
+      open={hintOpen}
+      onOpenChange={(v) => !generating && setHintOpen(v)}
+      placement="bottomLeft"
+      title="AI 生成卷契约草稿"
+      content={
+        <div style={{ width: 280 }}>
+          <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+            可选: 用一句话引导 AI(例如"侧重情感铺设"、"避免金手指过强")。留空则只用大纲+项目契约。
+          </Paragraph>
+          <Input.TextArea
+            value={hint}
+            onChange={(e) => setHint(e.target.value)}
+            rows={2}
+            placeholder="留空也可以"
+            maxLength={200}
+          />
+          <Space style={{ marginTop: 8, width: '100%', justifyContent: 'flex-end' }}>
+            <Button size="small" onClick={() => setHintOpen(false)}>取消</Button>
+            <Button size="small" type="primary" onClick={handleAIGenerate}>立即生成</Button>
+          </Space>
+        </div>
+      }
+    >
+      <Button icon={<ThunderboltOutlined />} loading={generating}>
+        AI 生成
+      </Button>
+    </Popover>
+  ) : null;
+
   return (
     <Drawer
       title={title ?? (mode === 'volume' ? '卷级契约' : '章级契约')}
@@ -131,9 +204,12 @@ export default function BriefEditor({
       onClose={onClose}
       width={520}
       extra={
-        <Button type="primary" icon={<SaveOutlined />} loading={saving} onClick={handleSave}>
-          保存
-        </Button>
+        <Space>
+          {aiButton}
+          <Button type="primary" icon={<SaveOutlined />} loading={saving} onClick={handleSave}>
+            保存
+          </Button>
+        </Space>
       }
     >
       <Paragraph type="secondary">
@@ -141,6 +217,13 @@ export default function BriefEditor({
           ? '本卷契约会作用于挂在本大纲下的所有章节,优先级高于项目级契约。'
           : '本章契约只作用于本章,优先级最高(会覆盖项目级和卷级)。'}
       </Paragraph>
+
+      {generating && (
+        <Card size="small" style={{ marginBottom: 16 }}>
+          <Text style={{ fontSize: 12 }}>{genMessage || '生成中...'}</Text>
+          <Progress percent={genProgress} size="small" status="active" />
+        </Card>
+      )}
 
       <Form layout="vertical">
         {mode === 'volume' && (

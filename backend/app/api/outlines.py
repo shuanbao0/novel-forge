@@ -2918,6 +2918,75 @@ async def expand_outline_to_chapters_stream(
     return create_sse_response(expand_outline_generator(outline_id, data, db, user_ai_service))
 
 
+async def _suggest_volume_brief_generator(
+    outline_id: str,
+    hint: str | None,
+    db: AsyncSession,
+    user_ai_service: AIService,
+) -> AsyncGenerator[str, None]:
+    """SSE: AI 生成卷级契约草稿(不入库, 仅回填表单)"""
+    from app.services.brief_generator import (
+        BriefContextBuilder,
+        BriefGenerationError,
+        VolumeBriefGenerator,
+    )
+
+    tracker = WizardProgressTracker("卷契约")
+    try:
+        yield await tracker.start()
+        yield await tracker.loading("收集项目与大纲上下文...", 0.5)
+        ctx = await BriefContextBuilder.build(outline_id, db)
+
+        yield await tracker.preparing(f"准备为《{ctx.target_outline.title}》生成卷契约...")
+        generator = VolumeBriefGenerator(user_ai_service)
+
+        yield await tracker.generating(
+            current_chars=0,
+            estimated_total=800,
+            message="🤖 AI 生成卷契约草稿...",
+        )
+        brief = await generator.generate(ctx, user_hint=hint)
+
+        yield await tracker.parsing("校验输出结构...")
+        yield await tracker.complete("卷契约草稿已生成, 请审阅后保存")
+        yield await tracker.result({"brief": brief})
+        yield await tracker.done()
+    except BriefGenerationError as e:
+        logger.warning(f"卷契约生成失败: {e}")
+        yield await tracker.error(f"AI 输出无法解析为合法契约: {e}", 422)
+    except ValueError as e:
+        yield await tracker.error(str(e), 404)
+    except Exception as e:
+        logger.exception("卷契约生成异常")
+        yield await tracker.error(f"生成失败: {e}", 500)
+
+
+@router.post("/{outline_id}/suggest-brief-stream", summary="AI 生成卷级契约草稿(SSE)")
+async def suggest_volume_brief_stream(
+    outline_id: str,
+    data: Dict[str, Any],
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service),
+):
+    """根据项目/大纲/前卷上下文, 让 AI 生成卷级契约草稿。
+
+    - 不入库, 仅通过 SSE result 事件返回 brief 字典, 由前端填入表单
+    - 请求体: {"hint": "可选的用户引导, 比如'侧重情感铺设'"}
+    """
+    outline = await db.get(Outline, outline_id)
+    if not outline:
+        raise HTTPException(status_code=404, detail="大纲不存在")
+
+    user_id = getattr(request.state, "user_id", None)
+    await verify_project_access(outline.project_id, user_id, db)
+
+    hint = (data or {}).get("hint")
+    return create_sse_response(
+        _suggest_volume_brief_generator(outline_id, hint, db, user_ai_service)
+    )
+
+
 @router.get("/{outline_id}/chapters", summary="获取大纲关联的章节")
 async def get_outline_chapters(
     outline_id: str,
