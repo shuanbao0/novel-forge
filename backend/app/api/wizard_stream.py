@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Dict, Any, AsyncGenerator
+import asyncio
 import json
 import re
 
@@ -1258,6 +1259,8 @@ async def outline_generator(
 ) -> AsyncGenerator[str, None]:
     """大纲生成流式生成器 - 向导仅生成大纲节点，不展开章节（避免等待过久）"""
     db_committed = False
+    # 后台子任务列表（角色/组织校验），用于 GeneratorExit 时统一取消
+    pending_tasks: list[asyncio.Task] = []
     # 初始化标准进度追踪器
     tracker = WizardProgressTracker("大纲")
     
@@ -1395,15 +1398,36 @@ async def outline_generator(
         yield await tracker.saving("🎭 校验角色信息...", 0.5)
         try:
             from app.services.auto_character_service import get_auto_character_service
-            
+
             auto_char_service = get_auto_character_service(user_ai_service)
-            char_check_result = await auto_char_service.check_and_create_missing_characters(
-                project_id=project_id,
-                outline_data_list=outline_data[:outline_count],
-                db=db,
-                user_id=user_id,
-                enable_mcp=enable_mcp
+            char_queue: asyncio.Queue = asyncio.Queue()
+
+            async def _on_char_progress(msg: str):
+                await char_queue.put(msg)
+
+            char_task = asyncio.create_task(
+                auto_char_service.check_and_create_missing_characters(
+                    project_id=project_id,
+                    outline_data_list=outline_data[:outline_count],
+                    db=db,
+                    user_id=user_id,
+                    enable_mcp=enable_mcp,
+                    progress_callback=_on_char_progress,
+                )
             )
+            pending_tasks.append(char_task)
+
+            # 边消费进度消息边发心跳，避免长时间静默触发中间层断连
+            while not char_task.done() or not char_queue.empty():
+                try:
+                    msg = await asyncio.wait_for(char_queue.get(), timeout=10.0)
+                    yield await tracker.saving(msg, 0.6)
+                except asyncio.TimeoutError:
+                    yield await tracker.heartbeat()
+
+            char_check_result = await char_task  # 重抛 service 内部异常
+            pending_tasks.remove(char_task)
+
             if char_check_result["created_count"] > 0:
                 created_names = [c.name for c in char_check_result["created_characters"]]
                 logger.info(f"🎭 向导大纲：自动创建了 {char_check_result['created_count']} 个角色: {', '.join(created_names)}")
@@ -1413,20 +1437,40 @@ async def outline_generator(
                 )
         except Exception as e:
             logger.error(f"⚠️ 向导大纲角色校验失败（不影响主流程）: {e}")
-        
+
         # 🏛️ 组织校验：检查大纲structure中的characters（type=organization）是否存在对应组织
         yield await tracker.saving("🏛️ 校验组织信息...", 0.55)
         try:
             from app.services.auto_organization_service import get_auto_organization_service
-            
+
             auto_org_service = get_auto_organization_service(user_ai_service)
-            org_check_result = await auto_org_service.check_and_create_missing_organizations(
-                project_id=project_id,
-                outline_data_list=outline_data[:outline_count],
-                db=db,
-                user_id=user_id,
-                enable_mcp=enable_mcp
+            org_queue: asyncio.Queue = asyncio.Queue()
+
+            async def _on_org_progress(msg: str):
+                await org_queue.put(msg)
+
+            org_task = asyncio.create_task(
+                auto_org_service.check_and_create_missing_organizations(
+                    project_id=project_id,
+                    outline_data_list=outline_data[:outline_count],
+                    db=db,
+                    user_id=user_id,
+                    enable_mcp=enable_mcp,
+                    progress_callback=_on_org_progress,
+                )
             )
+            pending_tasks.append(org_task)
+
+            while not org_task.done() or not org_queue.empty():
+                try:
+                    msg = await asyncio.wait_for(org_queue.get(), timeout=10.0)
+                    yield await tracker.saving(msg, 0.65)
+                except asyncio.TimeoutError:
+                    yield await tracker.heartbeat()
+
+            org_check_result = await org_task
+            pending_tasks.remove(org_task)
+
             if org_check_result["created_count"] > 0:
                 created_names = [c.name for c in org_check_result["created_organizations"]]
                 logger.info(f"🏛️ 向导大纲：自动创建了 {org_check_result['created_count']} 个组织: {', '.join(created_names)}")
@@ -1522,11 +1566,17 @@ async def outline_generator(
         
     except GeneratorExit:
         logger.warning("大纲生成器被提前关闭")
+        for t in pending_tasks:
+            if not t.done():
+                t.cancel()
         if not db_committed and db.in_transaction():
             await db.rollback()
             logger.info("大纲生成事务已回滚（GeneratorExit）")
     except Exception as e:
         logger.error(f"大纲生成失败: {str(e)}")
+        for t in pending_tasks:
+            if not t.done():
+                t.cancel()
         if not db_committed and db.in_transaction():
             await db.rollback()
             logger.info("大纲生成事务已回滚（异常）")
