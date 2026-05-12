@@ -253,6 +253,7 @@ export interface Outline {
   content: string;
   structure?: string;
   order_index: number;
+  creative_brief?: Record<string, unknown> | null;  // 卷级契约
   has_chapters?: boolean;
   created_at: string;
   updated_at: string;
@@ -270,6 +271,7 @@ export interface OutlineUpdate {
   title?: string;
   content?: string;
   structure?: string;  // 支持修改structure字段
+  creative_brief?: Record<string, unknown> | null;  // 卷级契约
   // order_index 只能通过 reorder 接口批量调整
 }
 
@@ -360,6 +362,7 @@ export interface Chapter {
   expansion_plan?: string; // JSON字符串，解析后为ExpansionPlanData
   outline_id?: string; // 关联的大纲ID
   sub_index?: number; // 大纲下的子章节序号
+  creative_brief?: Record<string, unknown> | null;  // 章级契约
   outline_title?: string; // 大纲标题（从后端联表查询获得）
   outline_order?: number; // 大纲排序序号（从后端联表查询获得）
   created_at: string;
@@ -382,6 +385,7 @@ export interface ChapterUpdate {
   summary?: string;
   // word_count 自动计算，不允许手动修改
   status?: 'draft' | 'writing' | 'completed';
+  creative_brief?: Record<string, unknown> | null;  // 章级契约
 }
 
 // 章节生成请求类型
@@ -513,6 +517,7 @@ export interface GenerateCharacterRequest {
 export interface PolishTextRequest {
   text: string;
   style?: string;
+  guide_ids?: string[];  // 结构化润色指南选择
 }
 
 // 向导API响应类型

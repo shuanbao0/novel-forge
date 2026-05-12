@@ -782,6 +782,213 @@ export const chapterApi = {
     }>(`/chapters/${chapterId}/apply-partial-regenerate`, data),
 };
 
+// ============ 章节审稿 API ============
+export interface ChapterReviewIssue {
+  id: string;
+  chapter_id: string;
+  project_id: string;
+  review_run_id: string;
+  dimension: string;
+  severity: 'info' | 'warn' | 'blocking';
+  category?: string | null;
+  title: string;
+  evidence?: string | null;
+  fix_hint?: string | null;
+  status: 'open' | 'ignored' | 'fixed';
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ChapterReviewSummary {
+  total: number;
+  by_severity: Record<string, number>;
+  by_dimension: Record<string, number>;
+  latest_run_id?: string | null;
+  latest_run_at?: string | null;
+}
+
+export interface ChapterReviewListResponse {
+  items: ChapterReviewIssue[];
+  summary: ChapterReviewSummary;
+}
+
+// ============ 创作契约 API ============
+export interface CreativeContractPayload {
+  style_baseline: string;
+  forbidden_zones: string[];
+  anti_patterns: string[];
+  required_tropes: string[];
+  narrative_promises: string[];
+}
+
+export interface CreativeContractResponse {
+  project_id: string;
+  contract: CreativeContractPayload;
+}
+
+export const creativeContractApi = {
+  get: (projectId: string) =>
+    api.get<unknown, CreativeContractResponse>(`/projects/${projectId}/creative-contract`),
+
+  update: (projectId: string, contract: CreativeContractPayload) =>
+    api.put<unknown, CreativeContractResponse>(
+      `/projects/${projectId}/creative-contract`,
+      { contract },
+    ),
+};
+
+// ============ 章节快照(Commit) API ============
+export interface ChapterCommit {
+  id: string;
+  chapter_id: string;
+  project_id: string;
+  chapter_number: number;
+  word_count: number;
+  content_hash: string;
+  review_summary: { total?: number; by_severity?: Record<string, number>; by_dimension?: Record<string, number> };
+  fulfillment: { total_nodes?: number; covered_count?: number; covered_nodes?: string[]; missed_nodes?: string[] };
+  extraction_meta: Record<string, unknown>;
+  notes?: string | null;
+  created_at?: string | null;
+}
+
+export interface ChapterCommitListResponse {
+  items: ChapterCommit[];
+  total: number;
+}
+
+export const chapterCommitApi = {
+  list: (chapterId: string, limit = 20) =>
+    api.get<unknown, ChapterCommitListResponse>(`/chapters/${chapterId}/commits`, { params: { limit } }),
+
+  latest: (chapterId: string) =>
+    api.get<unknown, ChapterCommit>(`/chapters/${chapterId}/commits/latest`),
+};
+
+// ============ 写作模式 API ============
+export interface StylePattern {
+  avg_sentence_length: number;
+  avg_paragraph_length: number;
+  dialogue_ratio: number;
+  punctuation_density: number;
+  short_sentence_ratio: number;
+  long_sentence_ratio: number;
+  favorite_adverbs: string[];
+  favorite_phrases: string[];
+  common_openers: string[];
+  rhythm: 'fast' | 'medium' | 'slow' | string;
+  sample_chapter_count: number;
+  sample_word_count: number;
+  extracted_at: string;
+}
+
+export interface StylePatternResponse {
+  project_id: string;
+  has_data?: boolean;
+  pattern: StylePattern;
+  prompt_block: string;
+}
+
+export const stylePatternApi = {
+  get: (projectId: string) =>
+    api.get<unknown, StylePatternResponse>(`/projects/${projectId}/style-patterns`),
+
+  learn: (projectId: string, sampleLimit = 20) =>
+    api.post<unknown, StylePatternResponse>(
+      `/projects/${projectId}/learn-style`,
+      undefined,
+      { params: { sample_limit: sampleLimit } },
+    ),
+
+  clear: (projectId: string) =>
+    api.delete<unknown, { success: boolean }>(`/projects/${projectId}/style-patterns`),
+};
+
+// ============ Polish 指南 API ============
+export interface PolishGuide {
+  id: string;
+  name: string;
+  focus: string;
+  rules: string[];
+  examples_good: string[];
+  examples_bad: string[];
+}
+
+export const polishGuidesApi = {
+  list: () =>
+    api.get<unknown, { items: PolishGuide[] }>('/polish/guides').then(r => r.items),
+};
+
+// ============ 统一搜索 API ============
+export interface SearchHit {
+  type: string;
+  id: string;
+  title: string;
+  snippet: string;
+  extra: Record<string, unknown>;
+}
+
+export interface UnifiedSearchResponse {
+  query: string;
+  project_id: string;
+  total: number;
+  by_type: Record<string, number>;
+  hits: SearchHit[];
+}
+
+export const unifiedSearchApi = {
+  search: (projectId: string, q: string, types?: string[], limitPerType = 10) =>
+    api.get<unknown, UnifiedSearchResponse>(`/projects/${projectId}/search`, {
+      params: {
+        q,
+        types: types && types.length > 0 ? types.join(',') : undefined,
+        limit_per_type: limitPerType,
+      },
+    }),
+
+  listTypes: () =>
+    api.get<unknown, { types: string[]; descriptions: Record<string, string> }>(
+      '/projects/_search/types',
+    ),
+};
+
+// ============ Volume / Chapter Brief 编辑 ============
+export interface VolumeBriefPayload {
+  volume_goal: string;
+  anti_patterns: string[];
+  required_tropes: string[];
+  pacing: string;
+}
+
+export interface ChapterBriefPayload {
+  directive: string;
+  forbidden_zones: string[];
+  must_check_nodes: string[];
+}
+
+// Brief 编辑没有独立端点,通过现有的 outline/chapter update 实现
+// outline/chapter 的更新 API 已存在,这里只补类型导出
+
+export const chapterReviewApi = {
+  list: (chapterId: string, params?: { status?: string; run_id?: string }) =>
+    api.get<unknown, ChapterReviewListResponse>(`/chapters/${chapterId}/reviews`, { params }),
+
+  ignore: (chapterId: string, reviewId: string) =>
+    api.post<unknown, { success: boolean; message: string }>(
+      `/chapters/${chapterId}/reviews/${reviewId}/ignore`,
+    ),
+
+  resolve: (chapterId: string, reviewId: string) =>
+    api.post<unknown, { success: boolean; message: string }>(
+      `/chapters/${chapterId}/reviews/${reviewId}/resolve`,
+    ),
+
+  rerun: (chapterId: string) =>
+    api.post<unknown, { success: boolean; scheduled: boolean; message: string }>(
+      `/chapters/${chapterId}/reviews/rerun`,
+    ),
+};
+
 export const writingStyleApi = {
   // 获取预设风格列表
   getPresetStyles: () =>
@@ -917,9 +1124,29 @@ export const promptWorkshopApi = {
     }>('/prompt-workshop/admin/stats'),
 };
 
+// 后端契约: { original_text, guide_ids?, provider?, model?, temperature? }
+export interface PolishCallPayload {
+  original_text: string;
+  guide_ids?: string[];
+  provider?: string;
+  model?: string;
+  temperature?: number;
+}
+
+export interface PolishCallResponse {
+  original_text: string;
+  polished_text: string;
+  word_count_before: number;
+  word_count_after: number;
+}
+
 export const polishApi = {
+  /** @deprecated 字段名不对,请用 polish() */
   polishText: (data: PolishTextRequest) =>
     api.post<unknown, { polished_text: string }>('/polish', data),
+
+  polish: (payload: PolishCallPayload) =>
+    api.post<unknown, PolishCallResponse>('/polish', payload),
 
   polishBatch: (texts: string[]) =>
     api.post<unknown, { polished_texts: string[] }>('/polish/batch', { texts }),

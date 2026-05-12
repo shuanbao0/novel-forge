@@ -7,11 +7,30 @@ from app.models.generation_history import GenerationHistory
 from app.schemas.polish import PolishRequest, PolishResponse
 from app.services.ai_service import AIService
 from app.services.prompt_service import prompt_service, PromptService
+from app.services.polish_guides import list_guides, render_guides_prompt
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service
 
 router = APIRouter(prefix="/polish", tags=["AI去味"])
 logger = get_logger(__name__)
+
+
+@router.get("/guides", summary="列出所有结构化润色指南")
+async def list_polish_guides():
+    """返回内置指南列表(scene_description/emotion/dialogue/action/pacing/sensory)"""
+    return {
+        "items": [
+            {
+                "id": g.id,
+                "name": g.name,
+                "focus": g.focus,
+                "rules": list(g.rules),
+                "examples_good": list(g.examples_good),
+                "examples_bad": list(g.examples_bad),
+            }
+            for g in list_guides()
+        ]
+    }
 
 
 @router.post("", response_model=PolishResponse, summary="AI去味")
@@ -43,6 +62,11 @@ async def polish_text(
             template,
             original_text=request.original_text
         )
+        # 若用户选择了结构化指南,把指南文本追加到 prompt 末尾(优先级高于默认 AI 去味)
+        guides_block = render_guides_prompt(request.guide_ids or [])
+        if guides_block:
+            prompt = f"{prompt}\n\n{guides_block}"
+            logger.info(f"🪶 已应用 {len(request.guide_ids)} 条结构化润色指南: {request.guide_ids}")
         
         logger.info(f"开始AI去味处理，原文长度: {len(request.original_text)}")
         

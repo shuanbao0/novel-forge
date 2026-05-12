@@ -147,8 +147,10 @@ from app.api import (
     auth, users, settings, writing_styles, memories,
     mcp_plugins, admin, inspiration, prompt_templates,
     changelog, careers, foreshadows, prompt_workshop, book_import,
-    project_covers, tasks
+    project_covers, tasks, chapter_reviews, creative_contracts, chapter_commits,
+    style_patterns, search
 )
+from app.api import polish
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
@@ -174,6 +176,12 @@ app.include_router(changelog.router, prefix="/api")  # 更新日志API
 app.include_router(prompt_workshop.router, prefix="/api")  # 提示词工坊API
 app.include_router(book_import.router, prefix="/api")  # 拆书导入API
 app.include_router(tasks.router, prefix="/api")  # 后台任务API
+app.include_router(chapter_reviews.router, prefix="/api")  # 章节审稿API
+app.include_router(creative_contracts.router, prefix="/api")  # 创作契约API
+app.include_router(chapter_commits.router, prefix="/api")  # 章节快照API
+app.include_router(style_patterns.router, prefix="/api")  # 写作模式API
+app.include_router(search.router, prefix="/api")  # 统一查询API
+app.include_router(polish.router, prefix="/api")  # AI去味+结构化润色API
 
 static_dir = Path(__file__).parent.parent / "static"
 generated_assets_root_dir = Path(__file__).parent.parent / "storage"

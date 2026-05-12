@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Spin, Alert, Button, Space, Switch, Drawer, message, Progress, theme } from 'antd';
+import { Card, Spin, Alert, Button, Space, Switch, Drawer, Tabs, message, Progress, theme } from 'antd';
 import {
   ArrowLeftOutlined,
   EyeOutlined,
@@ -13,6 +13,7 @@ import {
 import api from '../services/api';
 import AnnotatedText, { type MemoryAnnotation } from '../components/AnnotatedText';
 import MemorySidebar from '../components/MemorySidebar';
+import ChapterReviewPanel from '../components/ChapterReviewPanel';
 
 interface ChapterData {
   id: string;
@@ -349,7 +350,7 @@ const ChapterReader: React.FC = () => {
             flex: 1,
             overflowY: 'auto',
             padding: '32px 48px',
-            maxWidth: hasAnnotations ? 'calc(100% - 400px)' : '100%',
+            maxWidth: window.innerWidth >= 768 && chapter ? 'calc(100% - 400px)' : '100%',
           }}
         >
           <Card>
@@ -415,8 +416,8 @@ const ChapterReader: React.FC = () => {
           </Card>
         </div>
 
-        {/* 右侧：记忆侧边栏（桌面端） */}
-        {hasAnnotations && annotationsData && window.innerWidth >= 768 && (
+        {/* 右侧：记忆 / 审稿 侧边栏（桌面端） */}
+        {window.innerWidth >= 768 && chapter && (
           <div
             style={{
               width: 400,
@@ -425,10 +426,28 @@ const ChapterReader: React.FC = () => {
               background: token.colorBgLayout,
             }}
           >
-            <MemorySidebar
-              annotations={annotationsData.annotations}
-              activeAnnotationId={activeAnnotationId}
-              onAnnotationClick={handleAnnotationClick}
+            <Tabs
+              defaultActiveKey={hasAnnotations ? 'memory' : 'review'}
+              style={{ padding: '0 12px' }}
+              items={[
+                {
+                  key: 'memory',
+                  label: '记忆标注',
+                  disabled: !hasAnnotations,
+                  children: hasAnnotations && annotationsData ? (
+                    <MemorySidebar
+                      annotations={annotationsData.annotations}
+                      activeAnnotationId={activeAnnotationId}
+                      onAnnotationClick={handleAnnotationClick}
+                    />
+                  ) : null,
+                },
+                {
+                  key: 'review',
+                  label: '审稿意见',
+                  children: <ChapterReviewPanel chapterId={chapter.id} />,
+                },
+              ]}
             />
           </div>
         )}

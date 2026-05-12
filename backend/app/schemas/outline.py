@@ -24,6 +24,10 @@ class OutlineUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     structure: Optional[str] = Field(None, description="结构化大纲数据(JSON)")
+    creative_brief: Optional[Dict[str, Any]] = Field(
+        None,
+        description="卷级契约 JSON: {volume_goal, anti_patterns, required_tropes, pacing}",
+    )
     # order_index 不允许通过普通更新修改，只能通过 reorder_outlines 接口批量调整
 
 
@@ -35,6 +39,7 @@ class OutlineResponse(BaseModel):
     content: str
     structure: Optional[str] = None
     order_index: int
+    creative_brief: Optional[Dict[str, Any]] = None
     has_chapters: Optional[bool] = None
     created_at: datetime
     updated_at: datetime

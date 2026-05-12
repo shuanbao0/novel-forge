@@ -1,5 +1,5 @@
 """项目数据模型"""
-from sqlalchemy import Column, String, Text, DateTime, Integer, CheckConstraint
+from sqlalchemy import Column, String, Text, DateTime, Integer, JSON, CheckConstraint
 from sqlalchemy.sql import func
 from app.database import Base
 import uuid
@@ -32,6 +32,14 @@ class Project(Base):
     chapter_count = Column(Integer, comment="章节数量")
     narrative_perspective = Column(String(50), comment="叙事视角：first_person/third_person/omniscient")
     character_count = Column(Integer, default=5, comment="角色数量")
+
+    # 创作契约 - 借鉴 webnovel-writer MASTER_SETTING,作为全局硬约束
+    # 结构: {style_baseline, forbidden_zones, anti_patterns, required_tropes, narrative_promises}
+    creative_contract = Column(JSON, comment="创作契约:全局约束/反模式/读者承诺")
+
+    # 写作模式快照 - 借鉴 webnovel-writer /webnovel-learn
+    # 从已写章节自动抽取的作者风格特征,用于后续章节风格自一致
+    style_patterns = Column(JSON, comment="作者写作模式特征(由 /learn-style 接口生成)")
 
     # 封面字段
     cover_image_url = Column(String(1000), comment="封面图片访问地址")

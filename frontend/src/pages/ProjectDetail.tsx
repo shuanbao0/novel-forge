@@ -26,6 +26,10 @@ import ThemeSwitch from '../components/ThemeSwitch';
 import { useThemeMode } from '../theme/useThemeMode';
 import { getStoredSidebarCollapsed, setStoredSidebarCollapsed } from '../utils/sidebarState';
 import FloatingTaskPanel from '../components/FloatingTaskPanel';
+import CreativeContractEditor from '../components/CreativeContractEditor';
+import StylePatternsDrawer from '../components/StylePatternsDrawer';
+import UnifiedSearchDrawer from '../components/UnifiedSearchDrawer';
+import { SafetyCertificateOutlined, ReadOutlined, SearchOutlined } from '@ant-design/icons';
 
 const { Header, Sider, Content } = Layout;
 
@@ -38,6 +42,9 @@ export default function ProjectDetail() {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState<boolean>(() => getStoredSidebarCollapsed());
   const [drawerVisible, setDrawerVisible] = useState(false);
+  const [contractOpen, setContractOpen] = useState(false);
+  const [stylePatternsOpen, setStylePatternsOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [mobile, setMobile] = useState(isMobile());
   const { token } = theme.useToken();
   const alphaColor = (color: string, alpha: number) => `color-mix(in srgb, ${color} ${(alpha * 100).toFixed(0)}%, transparent)`;
@@ -178,6 +185,21 @@ export default function ProjectDetail() {
           icon: <CloudOutlined />,
           label: <Link to={`/project/${projectId}/prompt-workshop`}>提示词工坊</Link>,
         },
+        {
+          key: 'creative-contract',
+          icon: <SafetyCertificateOutlined />,
+          label: '创作契约',
+        },
+        {
+          key: 'style-patterns',
+          icon: <ReadOutlined />,
+          label: '写作模式',
+        },
+        {
+          key: 'search',
+          icon: <SearchOutlined />,
+          label: '跨实体搜索',
+        },
       ],
     },
   ];
@@ -282,7 +304,16 @@ export default function ProjectDetail() {
           paddingTop: '12px'
         }}
         items={collapsed ? menuItemsCollapsed : menuItems}
-        onClick={() => mobile && setDrawerVisible(false)}
+        onClick={({ key }) => {
+          if (key === 'creative-contract') {
+            setContractOpen(true);
+          } else if (key === 'style-patterns') {
+            setStylePatternsOpen(true);
+          } else if (key === 'search') {
+            setSearchOpen(true);
+          }
+          if (mobile) setDrawerVisible(false);
+        }}
       />
     </div>
   );
@@ -648,6 +679,33 @@ export default function ProjectDetail() {
 
       {/* 悬浮任务框 */}
       {projectId && <FloatingTaskPanel projectId={projectId} />}
+
+      {/* 创作契约编辑器 */}
+      {projectId && (
+        <CreativeContractEditor
+          projectId={projectId}
+          open={contractOpen}
+          onClose={() => setContractOpen(false)}
+        />
+      )}
+
+      {/* 写作模式 Drawer */}
+      {projectId && (
+        <StylePatternsDrawer
+          projectId={projectId}
+          open={stylePatternsOpen}
+          onClose={() => setStylePatternsOpen(false)}
+        />
+      )}
+
+      {/* 统一搜索 Drawer */}
+      {projectId && (
+        <UnifiedSearchDrawer
+          projectId={projectId}
+          open={searchOpen}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
     </Layout>
   );
 }

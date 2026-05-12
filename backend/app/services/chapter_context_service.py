@@ -14,6 +14,7 @@ from app.models.career import Career, CharacterCareer
 from app.models.memory import StoryMemory
 from app.models.foreshadow import Foreshadow
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
+from app.services.outline_nodes import parse_outline_nodes, render_nodes_for_prompt
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -299,12 +300,25 @@ class OneToManyContextBuilder:
 情感基调：{plan.get('emotional_tone', '未设定')}
 叙事目标：{plan.get('narrative_goal', '未设定')}
 冲突类型：{plan.get('conflict_type', '未设定')}"""
+                # 三层节点(CBN/CPN/CEN)若存在则附加在末尾,优先级高于宏观大纲
+                node_block = self._render_outline_node_block(outline)
+                if node_block:
+                    outline_content = f"{outline_content}\n\n{node_block}"
                 return outline_content
             except json.JSONDecodeError:
                 pass
-        
-        # 回退到大纲内容
-        return outline.content if outline else chapter.summary or '暂无大纲'
+
+        # 回退到大纲内容(也尝试附加节点)
+        base = outline.content if outline else chapter.summary or '暂无大纲'
+        node_block = self._render_outline_node_block(outline)
+        return f"{base}\n\n{node_block}" if node_block else base
+
+    def _render_outline_node_block(self, outline: Optional[Outline]) -> str:
+        """共用辅助:从 outline.structure 解析 CBN/CPN/CEN 节点并渲染"""
+        if not outline or not outline.structure:
+            return ""
+        nodes = parse_outline_nodes(outline.structure)
+        return render_nodes_for_prompt(nodes)
     
     async def _build_chapter_characters_1n(
         self,
@@ -1224,9 +1238,15 @@ class OneToOneContextBuilder:
                 
                 if structure.get('goal'):
                     outline_parts.append(f"【叙事目标】\n{structure['goal']}")
-                
+
+                # 三层节点(CBN/CPN/CEN)
+                nodes = parse_outline_nodes(structure)
+                node_block = render_nodes_for_prompt(nodes)
+                if node_block:
+                    outline_parts.append(node_block)
+
                 return "\n\n".join(outline_parts)
-                
+
             except json.JSONDecodeError as e:
                 logger.error(f"  ❌ 解析outline.structure失败: {e}")
                 return outline.content if outline else "暂无大纲"

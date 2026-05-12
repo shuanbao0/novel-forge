@@ -52,6 +52,9 @@ from app.schemas.regeneration import (
 )
 from app.services.ai_service import AIService
 from app.services.prompt_service import prompt_service, PromptService, WritingStyleManager
+from app.services.prompt_decorators import PromptContext, PromptPipeline
+from app.services.post_generation_pipeline import PostGenContext, PostGenPipeline
+from app.services.creative_contract import ChapterBrief, CreativeContract, VolumeBrief
 from app.services.plot_analyzer import PlotAnalyzer
 from app.services.memory_service import memory_service
 from app.services.foreshadow_service import foreshadow_service
@@ -1613,27 +1616,53 @@ async def generate_chapter_content_stream(
                         )
                         logger.debug(f"创建第一章提示词: {base_prompt}")
                 
-                # 应用写作风格
-                if style_content:
-                    prompt = WritingStyleManager.apply_style_to_prompt(base_prompt, style_content)
-                else:
-                    prompt = base_prompt
-                
+                # 🎨 通过 Decorator 管线统一处理 prompt(风格 + 项目/卷/章三级契约 + 便签 + 反 AI 味 + 输出格式)
+                project_contract = CreativeContract.from_raw(getattr(project, "creative_contract", None))
+                volume_brief = VolumeBrief.from_raw(getattr(outline, "creative_brief", None)) if outline else VolumeBrief()
+                chapter_brief = ChapterBrief.from_raw(getattr(current_chapter, "creative_brief", None))
+
+                # 记忆便签 - 把当前剧情快照注入
+                try:
+                    from app.services.memory_scratchpad import build_scratchpad
+                    pad = await build_scratchpad(db_session, project.id)
+                    scratchpad_text = pad.to_prompt_text()
+                except Exception as e:
+                    logger.warning(f"⚠️ 记忆便签构建失败(忽略): {e}")
+                    scratchpad_text = ""
+
+                # 写作模式 - 从项目已抽取的风格特征中读取
+                from app.services.style_pattern_extractor import style_pattern_from_raw
+                style_pattern_text = style_pattern_from_raw(getattr(project, "style_patterns", None)).to_prompt_block()
+
+                pipeline = PromptPipeline.for_chapter_generation(
+                    style_content=style_content,
+                    anti_ai_enabled=True,
+                    contract=project_contract,
+                    volume_brief=volume_brief,
+                    chapter_brief=chapter_brief,
+                    scratchpad_text=scratchpad_text,
+                    style_pattern_text=style_pattern_text,
+                )
+                prompt_ctx = pipeline.run(PromptContext(user_prompt=base_prompt))
+                prompt = prompt_ctx.user_prompt
+                system_prompt_with_style = prompt_ctx.system_prompt
+                if prompt_ctx.metadata.get("style_applied"):
+                    logger.info(f"✅ 已将写作风格注入系统提示词（{len(style_content)}字符）")
+                if prompt_ctx.metadata.get("contract_applied"):
+                    logger.info("✅ 已注入项目创作契约")
+                if prompt_ctx.metadata.get("volume_brief_applied"):
+                    logger.info("✅ 已注入卷级契约")
+                if prompt_ctx.metadata.get("chapter_brief_applied"):
+                    logger.info("✅ 已注入章级契约")
+                if prompt_ctx.metadata.get("scratchpad_applied"):
+                    logger.info("✅ 已注入记忆便签")
+                if prompt_ctx.metadata.get("anti_ai_applied"):
+                    logger.info("✅ 已注入反 AI 味强约束规则")
+
                 # === 准备阶段 ===
                 yield await tracker.preparing("准备AI提示词...")
-                
+
                 logger.info(f"开始AI流式创作章节 {chapter_id}")
-                
-                # 🎨 方案一：将写作风格注入到系统提示词（最高优先级）
-                system_prompt_with_style = None
-                if style_content:
-                    system_prompt_with_style = f"""【🎨 写作风格要求 - 最高优先级】
-
-{style_content}
-
-⚠️ 请严格遵循上述写作风格要求进行创作，这是最重要的指令！
-确保在整个章节创作过程中始终保持风格的一致性。"""
-                    logger.info(f"✅ 已将写作风格注入系统提示词（{len(style_content)}字符）")
                 
                 # 🔢 计算 max_tokens 限制
                 # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
@@ -1713,48 +1742,23 @@ async def generate_chapter_content_stream(
                 await db_session.refresh(current_chapter)
                 
                 logger.info(f"成功创作章节 {chapter_id}，共 {new_word_count} 字")
-                
-                # 🔮 章节生成后自动标记计划在本章埋入的伏笔
-                try:
-                    plant_result = await foreshadow_service.auto_plant_pending_foreshadows(
-                        db=db_session,
-                        project_id=project.id,
-                        chapter_id=chapter_id,
-                        chapter_number=current_chapter.chapter_number,
-                        chapter_content=full_content
-                    )
-                    if plant_result.get('planted_count', 0) > 0:
-                        logger.info(f"🔮 自动标记伏笔已埋入: {plant_result['planted_count']}个")
-                except Exception as plant_error:
-                    logger.warning(f"⚠️ 自动标记伏笔埋入失败: {str(plant_error)}")
-                
-                # 创建分析任务
-                analysis_task = AnalysisTask(
-                    chapter_id=chapter_id,
-                    user_id=current_user_id,
-                    project_id=project.id,
-                    status='pending',
-                    progress=0
-                )
-                db_session.add(analysis_task)
-                await db_session.commit()
-                await db_session.refresh(analysis_task)
-                
-                task_id = analysis_task.id
-                logger.info(f"📋 已创建分析任务: {task_id}")
-                
-                # 短暂延迟确保SQLite WAL完成写入
+
+                # 短暂延迟确保 SQLite WAL 完成写入
                 await asyncio.sleep(0.05)
-                
-                # 直接启动后台分析（并发执行）
-                background_tasks.add_task(
-                    analyze_chapter_background,
+
+                # 🔗 通过后处理管线串联:埋伏笔 -> 创建分析任务 -> 调度后台分析 -> (Phase 2) 章节审稿
+                post_gen_ctx = PostGenContext(
                     chapter_id=chapter_id,
-                    user_id=current_user_id,
                     project_id=project.id,
-                    task_id=task_id,
-                    ai_service=user_ai_service
+                    user_id=current_user_id,
+                    chapter_number=current_chapter.chapter_number,
+                    chapter_content=full_content,
+                    db=db_session,
+                    ai_service=user_ai_service,
+                    background_tasks=background_tasks,
                 )
+                post_gen_result = await PostGenPipeline.default().execute(post_gen_ctx)
+                task_id = post_gen_result.get("analysis_task_id")
                 
                 yield await tracker.saving("章节保存完成", 0.8)
                 
@@ -2101,23 +2105,35 @@ async def _run_chapter_generation_bg(
                 relevant_memories=chapter_context.relevant_memories or '暂无相关记忆'
             )
 
-    # 应用写作风格
-    if style_content:
-        prompt = WritingStyleManager.apply_style_to_prompt(base_prompt, style_content)
-    else:
-        prompt = base_prompt
+    # 🎨 通过 Decorator 管线统一处理 prompt(与 SSE 路径保持一致)
+    bg_project_contract = CreativeContract.from_raw(getattr(project, "creative_contract", None))
+    bg_volume_brief = VolumeBrief.from_raw(getattr(outline, "creative_brief", None)) if outline else VolumeBrief()
+    bg_chapter_brief = ChapterBrief.from_raw(getattr(current_chapter, "creative_brief", None))
+    try:
+        from app.services.memory_scratchpad import build_scratchpad as _bg_build_pad
+        bg_pad = await _bg_build_pad(db, project.id)
+        bg_scratchpad_text = bg_pad.to_prompt_text()
+    except Exception:
+        bg_scratchpad_text = ""
+
+    from app.services.style_pattern_extractor import style_pattern_from_raw as _bg_pattern_from_raw
+    bg_style_pattern_text = _bg_pattern_from_raw(getattr(project, "style_patterns", None)).to_prompt_block()
+
+    bg_pipeline = PromptPipeline.for_chapter_generation(
+        style_content=style_content,
+        anti_ai_enabled=True,
+        contract=bg_project_contract,
+        volume_brief=bg_volume_brief,
+        chapter_brief=bg_chapter_brief,
+        scratchpad_text=bg_scratchpad_text,
+        style_pattern_text=bg_style_pattern_text,
+    )
+    bg_prompt_ctx = bg_pipeline.run(PromptContext(user_prompt=base_prompt))
+    prompt = bg_prompt_ctx.user_prompt
+    system_prompt_with_style = bg_prompt_ctx.system_prompt
 
     # === 准备阶段 ===
     await tracker.preparing("准备AI提示词...")
-
-    system_prompt_with_style = None
-    if style_content:
-        system_prompt_with_style = f"""【🎨 写作风格要求 - 最高优先级】
-
-{style_content}
-
-⚠️ 请严格遵循上述写作风格要求进行创作，这是最重要的指令！
-确保在整个章节创作过程中始终保持风格的一致性。"""
 
     calculated_max_tokens = int(target_word_count * 3)
     calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))
@@ -2200,45 +2216,21 @@ async def _run_chapter_generation_bg(
 
     logger.info(f"✅ 后台创作章节 {chapter_id} 完成，共 {new_word_count} 字")
 
-    # 🔮 自动标记伏笔
-    try:
-        plant_result = await foreshadow_service.auto_plant_pending_foreshadows(
-            db=db,
-            project_id=current_chapter.project_id,
-            chapter_id=chapter_id,
-            chapter_number=current_chapter.chapter_number,
-            chapter_content=full_content
-        )
-        if plant_result.get('planted_count', 0) > 0:
-            logger.info(f"🔮 自动标记伏笔已埋入: {plant_result['planted_count']}个")
-    except Exception as plant_error:
-        logger.warning(f"⚠️ 自动标记伏笔埋入失败: {str(plant_error)}")
-
-    # 创建分析任务
-    analysis_task = AnalysisTask(
-        chapter_id=chapter_id,
-        user_id=user_id,
-        project_id=current_chapter.project_id,
-        status='pending',
-        progress=0
-    )
-    db.add(analysis_task)
-    await db.commit()
-    await db.refresh(analysis_task)
-
-    logger.info(f"📋 后台生成：已创建分析任务: {analysis_task.id}")
-
     await asyncio.sleep(0.05)
 
-    # 启动后台分析
-    asyncio.create_task(
-        analyze_chapter_background(
-            chapter_id=chapter_id,
-            user_id=user_id,
-            project_id=current_chapter.project_id,
-            task_id=analysis_task.id
-        )
+    # 🔗 通过后处理管线串联(bg 路径 background_tasks=None,Hook 会用 asyncio.create_task)
+    bg_post_gen_ctx = PostGenContext(
+        chapter_id=chapter_id,
+        project_id=current_chapter.project_id,
+        user_id=user_id,
+        chapter_number=current_chapter.chapter_number,
+        chapter_content=full_content,
+        db=db,
+        ai_service=ai_service,
+        background_tasks=None,
     )
+    bg_post_gen_result = await PostGenPipeline.default().execute(bg_post_gen_ctx)
+    analysis_task_id = bg_post_gen_result.get("analysis_task_id")
 
     # === 完成 ===
     await tracker.complete(f"创作完成！共 {new_word_count} 字")
@@ -2258,7 +2250,7 @@ async def _run_chapter_generation_bg(
                 .values(task_result={
                     "chapter_id": chapter_id,
                     "word_count": new_word_count,
-                    "analysis_task_id": analysis_task.id
+                    "analysis_task_id": analysis_task_id
                 })
             )
             await result_db.commit()

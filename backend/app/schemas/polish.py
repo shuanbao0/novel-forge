@@ -10,6 +10,10 @@ class PolishRequest(BaseModel):
     provider: Optional[str] = Field(None, description="AI提供商")
     model: Optional[str] = Field(None, description="AI模型")
     temperature: Optional[float] = Field(0.8, description="温度参数，建议0.7-0.9")
+    guide_ids: list[str] = Field(
+        default_factory=list,
+        description="结构化润色指南 id 列表(可选):scene_description/emotion_rendering/dialogue_rhythm/action_choreography/pacing_control/sensory_detail",
+    )
 
 
 class PolishResponse(BaseModel):

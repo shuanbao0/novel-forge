@@ -1,6 +1,7 @@
 ﻿import { useState, useEffect, useMemo } from 'react';
 import { Button, List, Modal, Form, Input, message, Empty, Space, Popconfirm, Card, Select, Radio, Tag, InputNumber, Tabs, Pagination, theme } from 'antd';
-import { EditOutlined, DeleteOutlined, ThunderboltOutlined, BranchesOutlined, AppstoreAddOutlined, CheckCircleOutlined, ExclamationCircleOutlined, PlusOutlined, FileTextOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, ThunderboltOutlined, BranchesOutlined, AppstoreAddOutlined, CheckCircleOutlined, ExclamationCircleOutlined, PlusOutlined, FileTextOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import BriefEditor from '../components/BriefEditor';
 import { useStore } from '../store';
 import { eventBus } from '../store/eventBus';
 import { getProjectTasks, type TaskStatus } from '../services/backgroundTaskService';
@@ -126,6 +127,9 @@ export default function Outline() {
 
   // ✅ 新增：记录场景区域的展开/折叠状态
   const [scenesExpandStatus, setScenesExpandStatus] = useState<Record<string, boolean>>({});
+
+  // 卷级契约编辑
+  const [briefTargetOutlineId, setBriefTargetOutlineId] = useState<string | null>(null);
 
   useEffect(() => {
     const handleResize = () => {
@@ -2272,6 +2276,14 @@ export default function Outline() {
                             </Button>
                           )}
                           <Button
+                            icon={<SafetyCertificateOutlined />}
+                            onClick={() => setBriefTargetOutlineId(item.id)}
+                            size={isMobile ? 'middle' : 'small'}
+                            title="设置卷级契约 - 本卷专属约束"
+                          >
+                            卷契约
+                          </Button>
+                          <Button
                             icon={<EditOutlined />}
                             onClick={() => handleOpenEditModal(item.id)}
                             size={isMobile ? 'middle' : 'small'}
@@ -2335,6 +2347,25 @@ export default function Outline() {
           </div>
         )}
       </div>
+
+      {/* 卷级契约编辑 Drawer */}
+      {briefTargetOutlineId && (() => {
+        const target = outlines.find(o => o.id === briefTargetOutlineId);
+        if (!target) return null;
+        return (
+          <BriefEditor
+            mode="volume"
+            open
+            initialValue={(target.creative_brief as Record<string, unknown> | null | undefined) ?? null}
+            title={`卷级契约 - ${target.title}`}
+            onClose={() => setBriefTargetOutlineId(null)}
+            onSave={async (brief) => {
+              await outlineApi.updateOutline(target.id, { creative_brief: brief });
+              eventBus.emit('outline:updated');
+            }}
+          />
+        );
+      })()}
     </>
   );
 }

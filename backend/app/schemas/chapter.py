@@ -38,6 +38,10 @@ class ChapterUpdate(BaseModel):
     summary: Optional[str] = None
     # word_count 自动计算，不允许手动修改
     status: Optional[str] = None
+    creative_brief: Optional[Dict[str, Any]] = Field(
+        None,
+        description="章级契约 JSON: {directive, forbidden_zones, must_check_nodes}",
+    )
 
 
 class ChapterResponse(BaseModel):
@@ -53,11 +57,12 @@ class ChapterResponse(BaseModel):
     outline_id: Optional[str] = None
     sub_index: Optional[int] = 1
     expansion_plan: Optional[str] = None
+    creative_brief: Optional[Dict[str, Any]] = None
     outline_title: Optional[str] = None  # 大纲标题（从Outline表联查）
     outline_order: Optional[int] = None  # 大纲排序序号（从Outline表联查）
     created_at: datetime
     updated_at: datetime
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 

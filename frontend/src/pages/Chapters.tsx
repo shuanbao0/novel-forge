@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme } from 'antd';
-import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined } from '@ant-design/icons';
+import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
 import { eventBus } from '../store/eventBus';
 import { useChapterSync } from '../store/hooks';
@@ -14,6 +14,9 @@ import { SSELoadingOverlay } from '../components/SSELoadingOverlay';
 import ChapterReader from '../components/ChapterReader';
 import PartialRegenerateToolbar from '../components/PartialRegenerateToolbar';
 import PartialRegenerateModal from '../components/PartialRegenerateModal';
+import BriefEditor from '../components/BriefEditor';
+import PolishModal from '../components/PolishModal';
+import { HighlightOutlined } from '@ant-design/icons';
 
 const { TextArea } = Input;
 
@@ -85,6 +88,8 @@ export default function Chapters() {
   // 规划编辑状态
   const [planEditorVisible, setPlanEditorVisible] = useState(false);
   const [editingPlanChapter, setEditingPlanChapter] = useState<Chapter | null>(null);
+  const [briefTargetChapterId, setBriefTargetChapterId] = useState<string | null>(null);
+  const [polishTargetChapter, setPolishTargetChapter] = useState<Chapter | null>(null);
 
   // 局部重写状态
   const [partialRegenerateToolbarVisible, setPartialRegenerateToolbarVisible] = useState(false);
@@ -2259,6 +2264,23 @@ export default function Chapters() {
                         >
                           修改
                         </Button>,
+                        <Button
+                          type="text"
+                          icon={<SafetyCertificateOutlined />}
+                          onClick={() => setBriefTargetChapterId(item.id)}
+                          title="设置章级契约 - 本章专属约束"
+                        >
+                          章契约
+                        </Button>,
+                        <Button
+                          type="text"
+                          icon={<HighlightOutlined />}
+                          onClick={() => setPolishTargetChapter(item)}
+                          disabled={!item.content || item.content.trim() === ''}
+                          title={!item.content ? '请先生成章节内容' : 'AI 结构化润色'}
+                        >
+                          润色
+                        </Button>,
                         // 只在 one-to-many 模式下显示删除按钮
                         ...(currentProject.outline_mode === 'one-to-many' ? [
                           <Popconfirm
@@ -3050,6 +3072,48 @@ export default function Chapters() {
           />
         );
       })()}
+
+      {/* 章级契约编辑 Drawer */}
+      {briefTargetChapterId && (() => {
+        const target = chapters.find(c => c.id === briefTargetChapterId);
+        if (!target) return null;
+        return (
+          <BriefEditor
+            mode="chapter"
+            open
+            initialValue={(target.creative_brief as Record<string, unknown> | null | undefined) ?? null}
+            title={`章级契约 - 第${target.chapter_number}章 ${target.title}`}
+            onClose={() => setBriefTargetChapterId(null)}
+            onSave={async (brief) => {
+              await chapterApi.updateChapter(target.id, {
+                creative_brief: brief,
+              } as ChapterUpdate);
+              eventBus.emit('chapter:updated');
+            }}
+          />
+        );
+      })()}
+
+      {/* AI 润色 Modal */}
+      {polishTargetChapter && (
+        <PolishModal
+          open
+          originalText={polishTargetChapter.content || ''}
+          onClose={() => setPolishTargetChapter(null)}
+          onApply={async (polishedText) => {
+            try {
+              await chapterApi.updateChapter(polishTargetChapter.id, {
+                content: polishedText,
+              } as ChapterUpdate);
+              message.success('已应用润色结果');
+              eventBus.emit('chapter:updated');
+            } catch (err) {
+              console.error(err);
+              message.error('保存润色结果失败');
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
