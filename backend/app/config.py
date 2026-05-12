@@ -66,18 +66,10 @@ class Settings(BaseSettings):
     database_slow_query_threshold: float = 1.0  # 慢查询阈值（秒）
     database_enable_metrics: bool = True  # 启用性能指标收集
     
-    # AI服务配置
-    openai_api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None
-    gemini_api_key: Optional[str] = None
-    gemini_base_url: Optional[str] = None
-    anthropic_api_key: Optional[str] = None
-    anthropic_base_url: Optional[str] = None
-    default_ai_provider: str = "openai"
-    default_model: str = "gpt-4"
-    default_temperature: float = 0.7
-    default_max_tokens: int = 32000
-    
+    # AI 服务配置完全由用户在前端「系统设置」中管理，用户之间数据隔离。
+    # 应用层不再持有任何系统级 AI 默认；未配置完成时 AI 接口直接报错。
+
+
     # MCP配置
     mcp_max_rounds: int = 3  # MCP工具调用最大轮数（全局统一控制）
     
@@ -146,7 +138,6 @@ class Settings(BaseSettings):
 settings = Settings()
 config_logger.info(f"配置加载完成: {settings.app_name} v{settings.app_version}")
 config_logger.debug(f"调试模式: {settings.debug}")
-config_logger.debug(f"AI提供商: {settings.default_ai_provider}")
 
 
 # ==================== 提示词工坊实例标识 ====================

@@ -71,12 +71,12 @@ class AIService:
 
     def __init__(
         self,
-        api_provider: Optional[str] = None,
-        api_key: Optional[str] = None,
-        api_base_url: Optional[str] = None,
-        default_model: Optional[str] = None,
-        default_temperature: Optional[float] = None,
-        default_max_tokens: Optional[int] = None,
+        api_provider: str,
+        api_key: str,
+        api_base_url: Optional[str],
+        default_model: str,
+        default_temperature: float,
+        default_max_tokens: int,
         default_system_prompt: Optional[str] = None,
         config: Optional[AIClientConfig] = None,
         # MCP支持参数
@@ -84,40 +84,35 @@ class AIService:
         db_session: Optional[Any] = None,
         enable_mcp: bool = True,
     ):
-        self.api_provider = normalize_provider(api_provider or app_settings.default_ai_provider)
-        self.default_model = default_model or app_settings.default_model
-        self.default_temperature = default_temperature or app_settings.default_temperature
-        self.default_max_tokens = default_max_tokens or app_settings.default_max_tokens
+        if not api_provider or not api_key or not default_model:
+            raise ValueError("AIService 必须显式传入 api_provider / api_key / default_model")
+
+        self.api_provider = normalize_provider(api_provider)
+        self.default_model = default_model
+        self.default_temperature = default_temperature
+        self.default_max_tokens = default_max_tokens
         self.default_system_prompt = default_system_prompt
         self.config = config or default_config
-        
+
         # MCP配置
         self.user_id = user_id
         self.db_session = db_session
         self._enable_mcp = enable_mcp
         self._cached_tools: Optional[List[Dict]] = None
         self._tools_loaded = False
-        
+
         self._openai_provider: Optional[OpenAIProvider] = None
         self._anthropic_provider: Optional[AnthropicProvider] = None
         self._gemini_provider: Optional[GeminiProvider] = None
-        
-        # 初始化 OpenAI
-        openai_key = api_key if self.api_provider == "openai" else app_settings.openai_api_key
-        if openai_key:
-            base_url = api_base_url if self.api_provider == "openai" else app_settings.openai_base_url
-            client = OpenAIClient(openai_key, base_url or "https://api.openai.com/v1", self.config)
+
+        # 仅初始化用户选择的那一家 provider，不做跨 provider 兜底，保证用户凭据隔离
+        if self.api_provider == "openai":
+            client = OpenAIClient(api_key, api_base_url or "https://api.openai.com/v1", self.config)
             self._openai_provider = OpenAIProvider(client)
-        
-        # 初始化 Anthropic
-        anthropic_key = api_key if self.api_provider == "anthropic" else app_settings.anthropic_api_key
-        if anthropic_key:
-            base_url = api_base_url if self.api_provider == "anthropic" else app_settings.anthropic_base_url
-            client = AnthropicClient(anthropic_key, base_url, self.config)
+        elif self.api_provider == "anthropic":
+            client = AnthropicClient(api_key, api_base_url, self.config)
             self._anthropic_provider = AnthropicProvider(client)
-        
-        # 初始化 Gemini
-        if self.api_provider == "gemini" and api_key:
+        elif self.api_provider == "gemini":
             client = GeminiClient(api_key, api_base_url, self.config)
             self._gemini_provider = GeminiProvider(client)
 

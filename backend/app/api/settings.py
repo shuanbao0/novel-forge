@@ -41,16 +41,40 @@ class CoverSettingsTestRequest(BaseModel):
     cover_image_model: str
 
 
-def read_env_defaults() -> Dict[str, Any]:
-    """从.env文件读取默认配置（仅读取，不修改）"""
+def _default_ai_seed() -> Dict[str, Any]:
+    """新用户 AI 配置的种子值。
+
+    所有字段均为空 / None，强制用户在前端「系统设置」中完整填写后才能使用 AI 功能，
+    确保用户之间的 API 凭据和模型选择完全隔离。
+    """
     return {
-        "api_provider": app_settings.default_ai_provider,
-        "api_key": app_settings.openai_api_key or app_settings.anthropic_api_key or "",
-        "api_base_url": app_settings.openai_base_url or app_settings.anthropic_base_url or "",
-        "llm_model": app_settings.default_model,
-        "temperature": app_settings.default_temperature,
-        "max_tokens": app_settings.default_max_tokens,
+        "api_provider": "",
+        "api_key": "",
+        "api_base_url": "",
+        "llm_model": "",
+        "temperature": None,
+        "max_tokens": None,
     }
+
+
+def _ensure_ai_configured(settings_record: "Settings") -> None:
+    """校验用户的 AI 配置是否完整。未完成时抛 400。"""
+    missing = []
+    if not (settings_record.api_provider or "").strip():
+        missing.append("AI 提供商")
+    if not (settings_record.api_key or "").strip():
+        missing.append("API Key")
+    if not (settings_record.llm_model or "").strip():
+        missing.append("模型名称")
+    if settings_record.temperature is None:
+        missing.append("温度参数")
+    if settings_record.max_tokens is None:
+        missing.append("最大 token 数")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"请先在系统设置中完成 AI 配置（缺少：{', '.join(missing)}）",
+        )
 
 
 def _safe_load_preferences(raw_preferences: Optional[str]) -> Dict[str, Any]:
@@ -86,13 +110,29 @@ def _build_ai_service_from_config(
     enable_mcp: bool,
 ) -> AIService:
     """基于指定配置创建AI服务。"""
+    missing = []
+    if not (config.get('api_provider') or "").strip():
+        missing.append("AI 提供商")
+    if not (config.get('api_key') or "").strip():
+        missing.append("API Key")
+    if not (config.get('llm_model') or "").strip():
+        missing.append("模型名称")
+    if config.get('temperature') is None:
+        missing.append("温度参数")
+    if config.get('max_tokens') is None:
+        missing.append("最大 token 数")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"预设配置不完整（缺少：{', '.join(missing)}）",
+        )
     return create_user_ai_service_with_mcp(
         api_provider=normalize_provider(config.get('api_provider')),
-        api_key=config.get('api_key') or "",
+        api_key=config['api_key'],
         api_base_url=config.get('api_base_url') or "",
-        model_name=config.get('llm_model') or app_settings.default_model,
-        temperature=config.get('temperature') if config.get('temperature') is not None else app_settings.default_temperature,
-        max_tokens=config.get('max_tokens') if config.get('max_tokens') is not None else app_settings.default_max_tokens,
+        model_name=config['llm_model'],
+        temperature=config['temperature'],
+        max_tokens=config['max_tokens'],
         user_id=user_id,
         db_session=db,
         system_prompt=config.get('system_prompt'),
@@ -122,7 +162,7 @@ async def get_or_create_admin_settings(db: AsyncSession, user: User) -> Settings
     settings = result.scalar_one_or_none()
 
     if not settings:
-        env_defaults = read_env_defaults()
+        env_defaults = _default_ai_seed()
         settings = Settings(
             user_id=user.user_id,
             smtp_provider=app_settings.SMTP_PROVIDER,
@@ -166,17 +206,13 @@ async def get_user_ai_service(
     settings = result.scalar_one_or_none()
     
     if not settings:
-        # 如果用户没有设置，从.env读取并保存
-        env_defaults = read_env_defaults()
-        settings = Settings(
-            user_id=user.user_id,
-            **env_defaults
+        raise HTTPException(
+            status_code=400,
+            detail="请先在系统设置中完成 AI 配置后再使用 AI 功能",
         )
-        db.add(settings)
-        await db.commit()
-        await db.refresh(settings)
-        logger.info(f"用户 {user.user_id} 首次使用AI服务，已从.env同步设置到数据库")
-    
+
+    _ensure_ai_configured(settings)
+
     # 查询用户的所有MCP插件状态
     mcp_result = await db.execute(
         select(MCPPlugin).where(MCPPlugin.user_id == user.user_id)
@@ -229,11 +265,12 @@ async def get_user_ai_service_from_db_by_usage(
     settings = result.scalar_one_or_none()
 
     if not settings:
-        env_defaults = read_env_defaults()
-        settings = Settings(user_id=user_id, **env_defaults)
-        db.add(settings)
-        await db.commit()
-        await db.refresh(settings)
+        raise HTTPException(
+            status_code=400,
+            detail="请先在系统设置中完成 AI 配置后再使用 AI 功能",
+        )
+
+    _ensure_ai_configured(settings)
 
     mcp_result = await db.execute(
         select(MCPPlugin).where(MCPPlugin.user_id == user_id)
@@ -278,30 +315,23 @@ async def get_settings(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    获取当前用户的设置
-    如果用户没有保存过设置，自动从.env创建并保存到数据库
+    获取当前用户的设置。
+
+    首次访问时创建一条全空的 Settings 记录，便于前端展示空表单引导用户填写；
+    用户必须填完后保存，才能调用任何 AI 接口。
     """
     result = await db.execute(
         select(Settings).where(Settings.user_id == user.user_id)
     )
     settings = result.scalar_one_or_none()
-    
+
     if not settings:
-        # 如果用户没有保存过设置，从.env读取默认配置并保存到数据库
-        env_defaults = read_env_defaults()
-        logger.info(f"用户 {user.user_id} 首次获取设置，自动从.env同步到数据库")
-        
-        # 创建新设置并保存到数据库
-        settings = Settings(
-            user_id=user.user_id,
-            **env_defaults
-        )
+        settings = Settings(user_id=user.user_id, **_default_ai_seed())
         db.add(settings)
         await db.commit()
         await db.refresh(settings)
-        logger.info(f"用户 {user.user_id} 的设置已从.env同步到数据库")
-    
-    logger.info(f"用户 {user.user_id} 获取已保存的设置")
+        logger.info(f"用户 {user.user_id} 首次访问设置页，已创建空白 Settings 记录")
+
     return settings
 
 
@@ -1076,25 +1106,23 @@ async def test_api_connection(data: ApiTestRequest):
 # ========== API配置预设管理（零数据库改动方案）==========
 
 async def get_user_settings(user_id: str, db: AsyncSession) -> Settings:
-    """获取用户settings，如果不存在则创建"""
+    """获取用户 settings 记录（不要求 AI 配置完整，仅供预设管理等读写 preferences）。"""
     result = await db.execute(
         select(Settings).where(Settings.user_id == user_id)
     )
     settings = result.scalar_one_or_none()
-    
+
     if not settings:
-        # 创建默认设置
-        env_defaults = read_env_defaults()
         settings = Settings(
             user_id=user_id,
-            **env_defaults,
-            preferences='{}'  # 初始化为空JSON
+            **_default_ai_seed(),
+            preferences='{}',
         )
         db.add(settings)
         await db.commit()
         await db.refresh(settings)
-        logger.info(f"用户 {user_id} 首次访问，已创建默认设置")
-    
+        logger.info(f"用户 {user_id} 首次访问，已创建空白 Settings 记录")
+
     return settings
 
 

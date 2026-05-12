@@ -1580,39 +1580,22 @@ class BookImportService:
 
     async def _build_user_ai_service(self, *, db: AsyncSession, user_id: str) -> AIService:
         """读取用户AI配置并创建支持MCP的AI服务实例。"""
+        from app.api.settings import _ensure_ai_configured
+
         settings_result = await db.execute(select(Settings).where(Settings.user_id == user_id))
         user_settings = settings_result.scalar_one_or_none()
 
         if not user_settings:
-            default_provider = app_settings.default_ai_provider
-            if default_provider == "anthropic":
-                default_key = app_settings.anthropic_api_key or ""
-                default_base_url = app_settings.anthropic_base_url or ""
-            elif default_provider == "gemini":
-                default_key = app_settings.gemini_api_key or ""
-                default_base_url = app_settings.gemini_base_url or ""
-            else:
-                default_key = app_settings.openai_api_key or ""
-                default_base_url = app_settings.openai_base_url or ""
-
-            user_settings = Settings(
-                user_id=user_id,
-                api_provider=default_provider,
-                api_key=default_key,
-                api_base_url=default_base_url,
-                llm_model=app_settings.default_model,
-                temperature=app_settings.default_temperature,
-                max_tokens=app_settings.default_max_tokens,
+            raise HTTPException(
+                status_code=400,
+                detail="请先在系统设置中完成 AI 配置后再执行拆书反向生成",
             )
-            db.add(user_settings)
-            await db.flush()
+
+        _ensure_ai_configured(user_settings)
 
         mcp_result = await db.execute(select(MCPPlugin).where(MCPPlugin.user_id == user_id))
         mcp_plugins = mcp_result.scalars().all()
         enable_mcp = any(plugin.enabled for plugin in mcp_plugins) if mcp_plugins else False
-
-        if not user_settings.api_key:
-            raise HTTPException(status_code=400, detail="未配置AI Key，无法执行拆书反向生成")
 
         return create_user_ai_service_with_mcp(
             api_provider=user_settings.api_provider,

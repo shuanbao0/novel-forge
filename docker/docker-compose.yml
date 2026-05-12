@@ -7,7 +7,6 @@
 #
 # 用法：
 #   cd docker/
-#   cp .env.example .env    # 按需修改
 #   docker compose up -d
 #
 # 仅部署中间件（应用跑在别处）：使用 docker-compose-env.yml
@@ -26,8 +25,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql
       - ../backend/scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-novelforge} -d ${POSTGRES_DB:-novel_forge}"]
@@ -81,8 +78,6 @@ services:
       - ${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
     volumes:
       - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-novelforge_redis}", "ping"]
@@ -107,7 +102,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./storage/generated_covers:/app/storage/generated_covers
-      - ./.env:/app/.env:ro
     environment:
       # 时区配置
       - TZ=${TZ:-Asia/Shanghai}
@@ -146,18 +140,6 @@ services:
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
-
-      # AI 服务配置
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
-      - DEFAULT_AI_PROVIDER=${DEFAULT_AI_PROVIDER:-openai}
-      - DEFAULT_MODEL=${DEFAULT_MODEL:-gpt-4o-mini}
-      - DEFAULT_TEMPERATURE=${DEFAULT_TEMPERATURE:-0.7}
-      - DEFAULT_MAX_TOKENS=${DEFAULT_MAX_TOKENS:-32000}
 
       # LinuxDO OAuth 配置
       - LINUXDO_CLIENT_ID=${LINUXDO_CLIENT_ID:-11111}
