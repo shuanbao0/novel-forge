@@ -22,6 +22,12 @@ from app.models.user import User as UserModel
 from app.models.settings import Settings as SettingsModel
 from app.services.email_service import email_service
 from app.security import create_session_token
+from app.infra.kv_store import get_kv_store
+from app.repositories import (
+    OAuthStateRepository,
+    EmailVerificationRepository,
+    VerificationRecord,
+)
 
 # 中国时区 UTC+8
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -39,11 +45,15 @@ router = APIRouter(prefix="/auth", tags=["认证"])
 # OAuth2 服务实例
 oauth_service = LinuxDOOAuthService()
 
-# State 临时存储（生产环境应使用 Redis）
-_state_storage = {}
+# 存储仓库：通过 KVStore 抽象底层（Redis 可用时走 Redis，否则进程内存降级）
+def _state_repo() -> OAuthStateRepository:
+    return OAuthStateRepository(get_kv_store())
 
-# 邮箱验证码临时存储（生产环境应使用 Redis）
-_email_verification_storage = {}
+
+def _verification_repo() -> EmailVerificationRepository:
+    return EmailVerificationRepository(get_kv_store())
+
+
 MAX_VERIFICATION_ATTEMPTS = 5
 
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -320,10 +330,6 @@ def _build_verification_mail_content(scene: str, code: str, ttl_minutes: int) ->
     return subject, text_body, html_body
 
 
-def _get_verification_storage_key(scene: str, email: str) -> str:
-    return f"{scene}:{email}"
-
-
 def _validate_verification_scene(scene: str) -> str:
     normalized_scene = scene.strip().lower()
     allowed_scenes = {"register", "login", "reset_password"}
@@ -435,18 +441,19 @@ async def send_email_verification_code(request: EmailSendCodeRequest):
     if not runtime["smtp_host"] or not runtime["smtp_username"] or not runtime["smtp_password"]:
         raise HTTPException(status_code=400, detail="系统 SMTP 未配置完整，暂无法发送验证码")
 
-    now = get_china_now()
-    storage_key = _get_verification_storage_key(scene, email)
-    cached = _email_verification_storage.get(storage_key)
+    now_ts = int(get_china_now().timestamp())
     resend_interval = runtime["verification_resend_interval_seconds"]
     ttl_minutes = runtime["verification_code_ttl_minutes"]
+    ttl_seconds = ttl_minutes * 60
+    repo = _verification_repo()
+    existing = await repo.get(scene, email, now_ts)
 
-    if cached and cached["last_sent_at"] + timedelta(seconds=resend_interval) > now:
-        remain_seconds = int((cached["last_sent_at"] + timedelta(seconds=resend_interval) - now).total_seconds())
-        raise HTTPException(status_code=429, detail=f"验证码发送过于频繁，请 {remain_seconds} 秒后重试")
+    if existing and not existing.expired:
+        remain_seconds = existing.record.last_sent_at + resend_interval - now_ts
+        if remain_seconds > 0:
+            raise HTTPException(status_code=429, detail=f"验证码发送过于频繁，请 {remain_seconds} 秒后重试")
 
     code = _generate_verification_code()
-    expires_at = now + timedelta(minutes=ttl_minutes)
     subject, text_body, html_body = _build_verification_mail_content(scene, code, ttl_minutes)
     from_email = runtime["smtp_from_email"] or runtime["smtp_username"]
 
@@ -465,18 +472,23 @@ async def send_email_verification_code(request: EmailSendCodeRequest):
         html_body=html_body,
     )
 
-    _email_verification_storage[storage_key] = {
-        "code": code,
-        "expires_at": expires_at,
-        "last_sent_at": now,
-        "attempts": 0,
-    }
+    await repo.save(
+        scene,
+        email,
+        VerificationRecord(
+            code=code,
+            expires_at=now_ts + ttl_seconds,
+            last_sent_at=now_ts,
+            attempts=0,
+        ),
+        ttl_seconds=ttl_seconds,
+    )
 
     logger.info(f"[邮箱验证码] 场景={scene} 已发送到 {email}")
     return {
         "success": True,
         "message": "验证码已发送，请检查邮箱",
-        "expire_in_seconds": ttl_minutes * 60,
+        "expire_in_seconds": ttl_seconds,
         "resend_interval_seconds": resend_interval,
     }
 
@@ -497,30 +509,31 @@ async def email_register(request: EmailRegisterRequest, response: Response):
     if len(code) != 6 or not code.isdigit():
         raise HTTPException(status_code=400, detail="请输入6位数字验证码")
 
-    cached = _email_verification_storage.get(_get_verification_storage_key("register", email))
-    if not cached:
+    now_ts = int(get_china_now().timestamp())
+    repo = _verification_repo()
+    lookup = await repo.get("register", email, now_ts)
+    if not lookup:
         raise HTTPException(status_code=400, detail="请先发送验证码")
-
-    now = get_china_now()
-    if cached["expires_at"] < now:
-        _email_verification_storage.pop(_get_verification_storage_key("register", email), None)
+    if lookup.expired:
+        await repo.delete("register", email)
         raise HTTPException(status_code=400, detail="验证码已过期，请重新发送")
 
-    if cached["code"] != code:
-        cached["attempts"] = cached.get("attempts", 0) + 1
-        if cached["attempts"] >= MAX_VERIFICATION_ATTEMPTS:
-            _email_verification_storage.pop(_get_verification_storage_key("register", email), None)
+    if lookup.record.code != code:
+        remaining_ttl = max(lookup.record.expires_at - now_ts, 1)
+        attempts = await repo.increment_attempts("register", email, lookup.record, remaining_ttl)
+        if attempts >= MAX_VERIFICATION_ATTEMPTS:
+            await repo.delete("register", email)
             raise HTTPException(status_code=429, detail="验证码错误次数过多，请重新发送")
         raise HTTPException(status_code=400, detail="验证码错误")
 
     existing_user = await _find_user_by_email(email)
     if existing_user:
-        _email_verification_storage.pop(_get_verification_storage_key("register", email), None)
+        await repo.delete("register", email)
         raise HTTPException(status_code=400, detail="该邮箱已注册")
 
     user = await _create_email_user(email, request.display_name)
     await password_manager.set_password(user.user_id, email, request.password)
-    _email_verification_storage.pop(_get_verification_storage_key("register", email), None)
+    await repo.delete("register", email)
 
     _set_login_cookies(response, user.user_id)
     logger.info(f"✅ [邮箱注册] 用户 {user.user_id} 注册并登录成功")
@@ -548,24 +561,24 @@ async def email_login(request: EmailLoginRequest, response: Response):
     if len(code) != 6 or not code.isdigit():
         raise HTTPException(status_code=400, detail="请输入6位数字验证码")
 
-    storage_key = _get_verification_storage_key("login", email)
-    cached = _email_verification_storage.get(storage_key)
-    if not cached:
+    now_ts = int(get_china_now().timestamp())
+    repo = _verification_repo()
+    lookup = await repo.get("login", email, now_ts)
+    if not lookup:
         raise HTTPException(status_code=400, detail="请先发送登录验证码")
-
-    now = get_china_now()
-    if cached["expires_at"] < now:
-        _email_verification_storage.pop(storage_key, None)
+    if lookup.expired:
+        await repo.delete("login", email)
         raise HTTPException(status_code=400, detail="登录验证码已过期，请重新发送")
 
-    if cached["code"] != code:
-        cached["attempts"] = cached.get("attempts", 0) + 1
-        if cached["attempts"] >= MAX_VERIFICATION_ATTEMPTS:
-            _email_verification_storage.pop(storage_key, None)
+    if lookup.record.code != code:
+        remaining_ttl = max(lookup.record.expires_at - now_ts, 1)
+        attempts = await repo.increment_attempts("login", email, lookup.record, remaining_ttl)
+        if attempts >= MAX_VERIFICATION_ATTEMPTS:
+            await repo.delete("login", email)
             raise HTTPException(status_code=429, detail="验证码错误次数过多，请重新发送")
         raise HTTPException(status_code=400, detail="登录验证码错误")
 
-    _email_verification_storage.pop(storage_key, None)
+    await repo.delete("login", email)
     await _touch_user_last_login(user.user_id)
     latest_user = await user_manager.get_user(user.user_id)
     if latest_user:
@@ -599,25 +612,25 @@ async def email_reset_password(request: EmailResetPasswordRequest):
     if len(code) != 6 or not code.isdigit():
         raise HTTPException(status_code=400, detail="请输入6位数字验证码")
 
-    storage_key = _get_verification_storage_key("reset_password", email)
-    cached = _email_verification_storage.get(storage_key)
-    if not cached:
+    now_ts = int(get_china_now().timestamp())
+    repo = _verification_repo()
+    lookup = await repo.get("reset_password", email, now_ts)
+    if not lookup:
         raise HTTPException(status_code=400, detail="请先发送重置密码验证码")
-
-    now = get_china_now()
-    if cached["expires_at"] < now:
-        _email_verification_storage.pop(storage_key, None)
+    if lookup.expired:
+        await repo.delete("reset_password", email)
         raise HTTPException(status_code=400, detail="重置密码验证码已过期，请重新发送")
 
-    if cached["code"] != code:
-        cached["attempts"] = cached.get("attempts", 0) + 1
-        if cached["attempts"] >= MAX_VERIFICATION_ATTEMPTS:
-            _email_verification_storage.pop(storage_key, None)
+    if lookup.record.code != code:
+        remaining_ttl = max(lookup.record.expires_at - now_ts, 1)
+        attempts = await repo.increment_attempts("reset_password", email, lookup.record, remaining_ttl)
+        if attempts >= MAX_VERIFICATION_ATTEMPTS:
+            await repo.delete("reset_password", email)
             raise HTTPException(status_code=429, detail="验证码错误次数过多，请重新发送")
         raise HTTPException(status_code=400, detail="重置密码验证码错误")
 
     await password_manager.set_password(user.user_id, email, request.new_password)
-    _email_verification_storage.pop(storage_key, None)
+    await repo.delete("reset_password", email)
     logger.info(f"✅ [邮箱重置密码] 用户 {user.user_id} 重置密码成功")
 
     return {
@@ -632,7 +645,7 @@ async def get_linuxdo_auth_url():
     state = oauth_service.generate_state()
     auth_url = oauth_service.get_authorization_url(state)
 
-    _state_storage[state] = True
+    await _state_repo().issue(state)
 
     return AuthUrlResponse(auth_url=auth_url, state=state)
 
@@ -654,10 +667,8 @@ async def _handle_callback(
     if not code or not state:
         raise HTTPException(status_code=400, detail="缺少 code 或 state 参数")
 
-    if state not in _state_storage:
+    if not await _state_repo().consume(state):
         raise HTTPException(status_code=400, detail="无效的 state 参数")
-
-    del _state_storage[state]
 
     token_data = await oauth_service.get_access_token(code)
     if not token_data or "access_token" not in token_data:

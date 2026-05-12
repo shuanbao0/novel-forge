@@ -27,6 +27,11 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    # 初始化 Redis 连接池（失败不阻塞启动，业务层走内存降级）
+    from app.infra.redis_client import init_redis, close_redis
+    redis_ok = await init_redis()
+    logger.info(f"Redis 状态: {'已连接' if redis_ok else '未连接（使用内存降级）'}")
+
     # 注册MCP状态同步服务
     register_status_sync()
 
@@ -45,19 +50,22 @@ async def lifespan(app: FastAPI):
         logger.warning(f"后台任务表检查失败（不影响启动）: {e}")
 
     logger.info("应用启动完成")
-    
+
     yield
-    
+
     # 清理MCP插件
     await mcp_client.cleanup()
-    
+
     # 清理HTTP客户端池
     from app.services.ai_service import cleanup_http_clients
     await cleanup_http_clients()
-    
+
+    # 关闭 Redis 连接池
+    await close_redis()
+
     # 关闭数据库连接
     await close_db()
-    
+
     logger.info("应用已关闭")
 
 

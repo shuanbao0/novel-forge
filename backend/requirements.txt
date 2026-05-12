@@ -10,6 +10,9 @@ psycopg2-binary==2.9.9  # PostgreSQL同步驱动（用于迁移脚本）
 alembic==1.14.0  # 数据库迁移工具
 aiosqlite==0.22.1
 
+# 缓存与分布式协调
+redis==5.2.0  # 含 asyncio 支持（OAuth state / 邮箱验证码 / worker 选主）
+
 # 数据验证
 pydantic==2.12.4
 pydantic-settings==2.11.0

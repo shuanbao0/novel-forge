@@ -7,6 +7,8 @@ from sqlalchemy import select, update
 from app.database import get_engine
 from app.models.background_task import BackgroundTask
 from app.logger import get_logger
+from app.infra.redis_client import get_redis
+from app.infra.distributed_lock import DistributedLock
 
 logger = get_logger(__name__)
 
@@ -153,11 +155,19 @@ class TaskProgressTracker:
 
 
 class BackgroundTaskService:
-    """后台任务管理服务（按用户排队：同用户任务逐个执行，不同用户可并发）"""
+    """后台任务管理服务（按用户排队：同用户任务逐个执行，不同用户可并发）
+
+    分布式选主：每个用户的 worker 协程启动前会尝试获取 Redis 分布式锁，
+    确保多 worker 部署时同一用户只有一个进程承担执行职责。
+    Redis 不可用时回退为无锁模式（等价于单 worker 行为）。
+    """
+
+    WORKER_LOCK_TTL = 60  # 工作协程锁 TTL（秒），由续期协程持续刷新
 
     def __init__(self):
-        self._user_queues: Dict[str, asyncio.Queue] = {}   # user_id -> Queue
-        self._user_workers: Dict[str, bool] = {}            # user_id -> worker是否运行中
+        self._user_queues: Dict[str, asyncio.Queue] = {}    # user_id -> Queue
+        self._user_workers: Dict[str, bool] = {}             # user_id -> worker是否运行中
+        self._user_locks: Dict[str, DistributedLock] = {}    # user_id -> 持有的分布式锁
 
     def _ensure_user_queue(self, user_id: str) -> asyncio.Queue:
         """确保指定用户的队列已初始化"""
@@ -165,13 +175,44 @@ class BackgroundTaskService:
             self._user_queues[user_id] = asyncio.Queue()
         return self._user_queues[user_id]
 
-    async def _start_user_worker(self, user_id: str):
-        """启动指定用户的工作协程"""
+    async def _try_acquire_worker_lock(self, user_id: str) -> Optional[DistributedLock]:
+        """尝试获取该用户的 worker 选主锁
+
+        - Redis 可用 + 抢锁成功：返回 DistributedLock
+        - Redis 可用 + 抢锁失败：返回 None（其他进程持有，本进程不启动 worker）
+        - Redis 不可用：返回 None 但调用方应继续启动 worker（无锁单机模式）
+        """
+        redis = get_redis()
+        if redis is None:
+            return None
+        lock = DistributedLock(redis, f"task_worker:{user_id}", ttl=self.WORKER_LOCK_TTL)
+        if await lock.try_acquire():
+            return lock
+        return None
+
+    async def _start_user_worker(self, user_id: str) -> bool:
+        """启动指定用户的工作协程
+
+        返回 True 表示本进程承担该用户的 worker（首次启动或已在运行）；
+        False 表示锁被其他进程持有，本进程不启动 worker。
+        """
         if self._user_workers.get(user_id, False):
-            return
+            return True
+
+        redis = get_redis()
+        lock: Optional[DistributedLock] = None
+        if redis is not None:
+            lock = await self._try_acquire_worker_lock(user_id)
+            if lock is None:
+                logger.info(f"📋 用户 {user_id[:8]} 的 worker 已在其他进程运行（锁被持有）")
+                return False
+            self._user_locks[user_id] = lock
+
         self._user_workers[user_id] = True
         asyncio.create_task(self._user_worker_loop(user_id))
-        logger.info(f"📋 用户 {user_id[:8]} 的任务队列工作协程已启动")
+        scope = "分布式锁" if lock else "单机模式"
+        logger.info(f"📋 用户 {user_id[:8]} 的任务队列工作协程已启动（{scope}）")
+        return True
 
     async def _user_worker_loop(self, user_id: str):
         """从指定用户的队列中逐个取出任务并执行"""
@@ -217,8 +258,14 @@ class BackgroundTaskService:
                 except Exception as e:
                     logger.error(f"❌ [用户{user_id[:8]}] 队列工作循环异常: {e}", exc_info=True)
         finally:
-            # 工作协程退出时清理标记
+            # 工作协程退出时清理标记并释放锁
             self._user_workers.pop(user_id, None)
+            lock = self._user_locks.pop(user_id, None)
+            if lock is not None:
+                try:
+                    await lock.release()
+                except Exception as e:
+                    logger.warning(f"释放 worker 锁失败: {e}")
             logger.info(f"📋 用户 {user_id[:8]} 的工作协程已退出")
 
     @staticmethod
@@ -334,7 +381,34 @@ class BackgroundTaskService:
         """
         # 确保该用户的队列和工作协程已启动
         queue = self._ensure_user_queue(user_id)
-        await self._start_user_worker(user_id)
+        owns_worker = await self._start_user_worker(user_id)
+
+        if not owns_worker:
+            # 多 worker 部署下，本进程没拿到 worker 锁。任务函数是闭包无法跨进程传递，
+            # 此处仅记录告警并保持 pending 状态，让用户看到任务停滞而非误以为成功。
+            # 当切多 worker 时应改用 Redis 队列 + handler 注册表完成跨进程派发。
+            logger.warning(
+                f"⚠️ 任务 {task_id[:8]} 提交到未持有 worker 锁的进程，"
+                f"用户 {user_id[:8]} 的执行进程是其他实例；任务将保持 pending 直至本进程接管"
+            )
+            try:
+                engine = await get_engine(user_id)
+                AsyncSessionLocal = async_sessionmaker(
+                    engine, class_=AsyncSession, expire_on_commit=False
+                )
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(BackgroundTask).where(BackgroundTask.id == task_id)
+                    )
+                    task = result.scalar_one_or_none()
+                    if task and task.status == "pending":
+                        task.status_message = "等待执行进程接管..."
+                        task.progress_details = {"stage": "waiting_worker"}
+                        task.updated_at = datetime.now()
+                        await session.commit()
+            except Exception as e:
+                logger.error(f"更新等待状态失败: {e}")
+            return
 
         # 将任务放入该用户的队列
         await queue.put({

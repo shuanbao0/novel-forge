@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     WORKSHOP_MODE: str = "client"  # client: 本地部署实例, server: 云端中央服务器
     WORKSHOP_CLOUD_URL: str = ""  # 云端服务地址（需配置）
     WORKSHOP_API_TIMEOUT: int = 30  # 云端API请求超时时间（秒）
+
+    # Redis 配置（用于 OAuth state / 邮箱验证码 / 后台 worker 分布式选主）
+    # REDIS_URL 不配置或 REDIS_ENABLED=False 时，自动降级到进程内存实现（仅适合单 worker 部署）
+    REDIS_URL: Optional[str] = None
+    REDIS_ENABLED: bool = True
+    REDIS_SOCKET_TIMEOUT: float = 3.0
+    REDIS_HEALTH_CHECK_INTERVAL: int = 30
     
     class Config:
         env_file = ".env"
