@@ -98,7 +98,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-8001}:8000"
     volumes:
       - ./logs:/app/logs
       - ./storage/generated_covers:/app/storage/generated_covers
