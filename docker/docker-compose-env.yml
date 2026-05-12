@@ -1,0 +1,108 @@
+# =====================================================================
+# novel-forge 基础设施（中间件）部署文件
+# ---------------------------------------------------------------------
+# 包含：
+#   - postgres : 主数据库（业务数据 + 用户）
+#   - redis    : 缓存 / OAuth state / 邮箱验证码 / 会话
+#
+# 用法：
+#   cd docker/
+#   cp .env.example .env   # 按需修改
+#   docker compose -f docker-compose-env.yml up -d
+#
+# 网络 novel-forge-network 在本文件中创建，docker-compose.yml 以 external
+# 方式引用，确保中间件与应用容器互通。
+# =====================================================================
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: novel-forge-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-novel_forge}
+      POSTGRES_USER: ${POSTGRES_USER:-novelforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ../backend/scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-novelforge} -d ${POSTGRES_DB:-novel_forge}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - novel-forge-network
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-1GB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - checkpoint_completion_target=${POSTGRES_CHECKPOINT_COMPLETION_TARGET:-0.9}
+      - -c
+      - wal_buffers=${POSTGRES_WAL_BUFFERS:-16MB}
+      - -c
+      - default_statistics_target=${POSTGRES_DEFAULT_STATISTICS_TARGET:-100}
+      - -c
+      - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
+      - -c
+      - effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY:-200}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+      - -c
+      - min_wal_size=${POSTGRES_MIN_WAL_SIZE:-1GB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-4GB}
+
+  redis:
+    image: redis:7-alpine
+    container_name: novel-forge-redis
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-novelforge_redis}
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-512mb}
+      - --maxmemory-policy
+      - ${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-novelforge_redis}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - novel-forge-network
+
+volumes:
+  postgres_data:
+    name: novel-forge-postgres-data
+    driver: local
+  redis_data:
+    name: novel-forge-redis-data
+    driver: local
+
+networks:
+  novel-forge-network:
+    name: novel-forge-network
+    driver: bridge
