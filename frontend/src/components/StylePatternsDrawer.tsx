@@ -28,7 +28,7 @@ import {
   type StylePattern,
 } from '../services/api';
 
-const { Title, Paragraph, Text } = Typography;
+const { Paragraph, Text } = Typography;
 
 interface StylePatternsDrawerProps {
   projectId: string;

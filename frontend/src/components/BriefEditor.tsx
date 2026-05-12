@@ -20,7 +20,7 @@ import {
 } from 'antd';
 import { PlusOutlined, SaveOutlined } from '@ant-design/icons';
 
-const { Title, Paragraph, Text } = Typography;
+const { Paragraph, Text } = Typography;
 
 export type BriefMode = 'volume' | 'chapter';
 

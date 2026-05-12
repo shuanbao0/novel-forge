@@ -31,7 +31,7 @@ import {
 import { polishApi } from '../services/api';
 import PolishGuidesPicker from './PolishGuidesPicker';
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 interface PolishModalProps {
   open: boolean;

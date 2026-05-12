@@ -354,7 +354,7 @@ function ReadingPullView({ commit }: { commit: ChapterCommit | null }) {
         {Object.entries(pull.breakdown || {}).map(([k, v]) => (
           <Descriptions.Item key={k} label={k}>
             <Tag color={(v as number) > 0 ? 'green' : (v as number) < 0 ? 'red' : 'default'}>
-              {(v as number) > 0 ? `+${v}` : v}
+              {(v as number) > 0 ? `+${v as number}` : (v as number)}
             </Tag>
           </Descriptions.Item>
         ))}
