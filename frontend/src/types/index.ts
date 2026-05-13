@@ -1158,10 +1158,8 @@ export interface PromptWorkshopListResponse {
 }
 
 export interface PromptWorkshopStatusResponse {
-  mode: 'client' | 'server';
+  mode: string;
   instance_id: string;
-  cloud_url?: string;
-  cloud_connected?: boolean;
 }
 
 export interface PromptWorkshopAdminStats {

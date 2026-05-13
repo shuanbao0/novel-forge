@@ -116,11 +116,6 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_CODE_TTL_MINUTES: int = 10
     EMAIL_VERIFICATION_RESEND_INTERVAL_SECONDS: int = 60
     
-    # 提示词工坊配置
-    WORKSHOP_MODE: str = "client"  # client: 本地部署实例, server: 云端中央服务器
-    WORKSHOP_CLOUD_URL: str = ""  # 云端服务地址（需配置）
-    WORKSHOP_API_TIMEOUT: int = 30  # 云端API请求超时时间（秒）
-
     # Redis 配置（用于 OAuth state / 邮箱验证码 / 后台 worker 分布式选主）
     # REDIS_URL 不配置或 REDIS_ENABLED=False 时，自动降级到进程内存实现（仅适合单 worker 部署）
     REDIS_URL: Optional[str] = None
@@ -141,41 +136,28 @@ config_logger.debug(f"调试模式: {settings.debug}")
 
 
 # ==================== 提示词工坊实例标识 ====================
+# 提示词工坊已改为本地模式：不再依赖云端服务。
+# INSTANCE_ID 仍保留，作为 user_identifier 与 source_instance 的固定前缀，
+# 以兼容历史数据中已存在的 "instance:user" 格式记录。
 
 def get_or_create_instance_id() -> str:
-    """获取或创建实例唯一标识
-    
-    - Server 模式：固定使用 "server" 作为标识，确保与所有 Client 实例区分
-    - Client 模式：从 .instance_id 文件读取或自动生成唯一标识
-    """
-    # Server 模式使用固定标识
-    if settings.WORKSHOP_MODE.lower() == "server":
-        config_logger.info("Server 模式：使用固定实例标识 'server'")
-        return "server"
-    
-    # Client 模式：从文件读取或生成
+    """获取或创建本地实例标识（兼容历史数据）"""
     instance_file = PROJECT_ROOT / ".instance_id"
     if instance_file.exists():
         with open(instance_file, 'r') as f:
             instance_id = f.read().strip()
-            if instance_id and instance_id != "server":  # 确保不与 server 冲突
+            if instance_id:
                 return instance_id
-    
-    # 生成新的实例ID
-    instance_id = str(uuid.uuid4())[:12]
+
+    instance_id = "local"
     try:
         with open(instance_file, 'w') as f:
             f.write(instance_id)
-        config_logger.info(f"生成新的实例标识: {instance_id}")
+        config_logger.info(f"生成本地实例标识: {instance_id}")
     except Exception as e:
         config_logger.warning(f"无法保存实例标识到文件: {e}")
-    
+
     return instance_id
 
 INSTANCE_ID = get_or_create_instance_id()
-
-def is_workshop_server() -> bool:
-    """判断当前实例是否为工坊服务端"""
-    return settings.WORKSHOP_MODE.lower() == "server"
-
-config_logger.info(f"提示词工坊模式: {settings.WORKSHOP_MODE}, 实例ID: {INSTANCE_ID}")
+config_logger.info(f"提示词工坊实例ID: {INSTANCE_ID}")

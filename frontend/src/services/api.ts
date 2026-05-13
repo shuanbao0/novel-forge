@@ -1040,7 +1040,7 @@ export const writingStyleApi = {
 export const promptWorkshopApi = {
   // 检查服务状态
   getStatus: () =>
-    api.get<unknown, { mode: string; instance_id: string; cloud_url?: string; cloud_connected?: boolean }>('/prompt-workshop/status'),
+    api.get<unknown, { mode: string; instance_id: string }>('/prompt-workshop/status'),
 
   // 获取工坊提示词列表
   getItems: (params?: {
@@ -1090,7 +1090,7 @@ export const promptWorkshopApi = {
       params: { force: true }
     }),
 
-  // ========== 管理员 API（仅服务端模式可用） ==========
+  // ========== 管理员 API ==========
   
   // 获取待审核列表
   adminGetSubmissions: (params?: { status?: string; source?: string; page?: number; limit?: number }) =>

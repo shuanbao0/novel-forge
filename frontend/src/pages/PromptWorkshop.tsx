@@ -35,8 +35,7 @@ import {
   CloseCircleOutlined,
   SyncOutlined,
   DeleteOutlined,
-  CloudOutlined,
-  DisconnectOutlined,
+  AppstoreOutlined,
   SettingOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
@@ -63,13 +62,6 @@ export default function PromptWorkshop() {
   const [category, setCategory] = useState<string>('');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [sortBy, setSortBy] = useState<'newest' | 'popular' | 'downloads'>('newest');
-  
-  // 服务状态
-  const [serviceStatus, setServiceStatus] = useState<{
-    mode: string;
-    instance_id: string;
-    cloud_connected?: boolean;
-  } | null>(null);
   
   // 提交相关
   const [isSubmitModalOpen, setIsSubmitModalOpen] = useState(false);
@@ -123,8 +115,8 @@ export default function PromptWorkshop() {
   const isMobile = window.innerWidth <= 768;
   const { token } = theme.useToken();
   
-  // 判断是否为服务端管理员
-  const isServerAdmin = serviceStatus?.mode === 'server' && currentUser?.is_admin;
+  // 判断当前用户是否为管理员
+  const isAdmin = !!currentUser?.is_admin;
 
   // 卡片网格配置 - 与 WritingStyles 保持一致
   const gridConfig = {
@@ -136,15 +128,11 @@ export default function PromptWorkshop() {
     xl: 6,
   };
 
-  // 加载服务状态和用户信息
+  // 加载当前用户信息
   useEffect(() => {
     const init = async () => {
       try {
-        const [status, user] = await Promise.all([
-          promptWorkshopApi.getStatus(),
-          authApi.getCurrentUser().catch(() => null),
-        ]);
-        setServiceStatus(status);
+        const user = await authApi.getCurrentUser().catch(() => null);
         setCurrentUser(user);
       } catch (error) {
         console.error('Failed to initialize:', error);
@@ -236,7 +224,7 @@ export default function PromptWorkshop() {
       submitForm.resetFields();
       loadMySubmissions();
       // 如果是服务端管理员，刷新待审核列表
-      if (isServerAdmin) {
+      if (isAdmin) {
         loadAdminSubmissions();
       }
     } catch (error) {
@@ -254,7 +242,7 @@ export default function PromptWorkshop() {
       message.success('已撤回');
       loadMySubmissions();
       // 如果是服务端管理员，刷新待审核列表
-      if (isServerAdmin) {
+      if (isAdmin) {
         loadAdminSubmissions();
       }
     } catch (error) {
@@ -278,7 +266,7 @@ export default function PromptWorkshop() {
           message.success('删除成功');
           loadMySubmissions();
           // 如果是服务端管理员，刷新相关列表
-          if (isServerAdmin) {
+          if (isAdmin) {
             loadAdminSubmissions();
           }
         } catch (error) {
@@ -343,18 +331,6 @@ export default function PromptWorkshop() {
   // 渲染筛选区域（固定在顶部）
   const renderFilterBar = () => (
     <div style={{ marginBottom: 16 }}>
-      {/* 服务状态 */}
-      {serviceStatus && !serviceStatus.cloud_connected && serviceStatus.mode === 'client' && (
-        <Alert
-          type="warning"
-          message="云端服务未连接"
-          description="无法访问提示词工坊，请检查网络连接或稍后重试"
-          icon={<DisconnectOutlined />}
-          showIcon
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      
       {/* 筛选区域 */}
       <div style={{
         display: 'flex',
@@ -641,7 +617,7 @@ export default function PromptWorkshop() {
 
   // 加载管理员待审核列表
   const loadAdminSubmissions = async () => {
-    if (!isServerAdmin) return;
+    if (!isAdmin) return;
     
     setAdminSubmissionsLoading(true);
     try {
@@ -661,7 +637,7 @@ export default function PromptWorkshop() {
 
   // 加载已发布的提示词列表（管理员用）
   const loadPublishedItems = async () => {
-    if (!isServerAdmin) return;
+    if (!isAdmin) return;
     
     setPublishedLoading(true);
     try {
@@ -999,11 +975,8 @@ export default function PromptWorkshop() {
           gap: 12,
         }}>
           <h2 style={{ margin: 0, fontSize: isMobile ? 18 : 24, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <CloudOutlined />
+            <AppstoreOutlined />
             提示词工坊
-            {serviceStatus?.mode === 'server' && (
-              <Badge status="success" text="服务端模式" style={{ marginLeft: 8, fontSize: 12 }} />
-            )}
           </h2>
           <Button
             type="primary"
@@ -1035,7 +1008,7 @@ export default function PromptWorkshop() {
                 </Badge>
               ),
             },
-            ...(isServerAdmin ? [{
+            ...(isAdmin ? [{
               key: 'admin',
               label: (
                 <Badge count={adminPendingCount} size="small">
