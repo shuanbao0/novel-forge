@@ -2902,15 +2902,34 @@ export default function Chapters() {
               <Form.Item
                 label="生成数量"
                 name="count"
-                rules={[{ required: true, message: '请选择' }]}
+                rules={[
+                  { required: true, message: '请输入' },
+                  { type: 'number', min: 1, max: 100, message: '范围 1-100 章' },
+                ]}
                 style={{ marginBottom: 12 }}
               >
-                <Radio.Group buttonStyle="solid" size={isMobile ? 'small' : 'middle'}>
-                  <Radio.Button value={5}>5章</Radio.Button>
-                  <Radio.Button value={10}>10章</Radio.Button>
-                  <Radio.Button value={15}>15章</Radio.Button>
-                  <Radio.Button value={20}>20章</Radio.Button>
-                </Radio.Group>
+                <InputNumber
+                  min={1}
+                  max={100}
+                  step={1}
+                  style={{ width: '100%' }}
+                  placeholder="自定义 1-100 章"
+                  formatter={(value) => (value ? `${value} 章` : '')}
+                  parser={(value) => parseInt(value?.replace(' 章', '') || '0', 10) as unknown as 1}
+                  addonBefore={
+                    <Space size={4}>
+                      {[5, 10, 20, 50].map(n => (
+                        <a
+                          key={n}
+                          onClick={() => batchForm.setFieldValue('count', n)}
+                          style={{ fontSize: 12 }}
+                        >
+                          {n}
+                        </a>
+                      ))}
+                    </Space>
+                  }
+                />
               </Form.Item>
             </div>
 

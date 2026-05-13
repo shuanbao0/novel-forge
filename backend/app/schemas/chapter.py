@@ -131,7 +131,7 @@ class ChapterGenerateRequest(BaseModel):
 class BatchGenerateRequest(BaseModel):
     """批量生成章节的请求模型"""
     start_chapter_number: int = Field(..., description="起始章节序号")
-    count: int = Field(..., description="生成章节数量", ge=1, le=20)
+    count: int = Field(..., description="生成章节数量", ge=1, le=100)
     style_id: Optional[int] = Field(None, description="写作风格ID")
     target_word_count: Optional[int] = Field(
         3000,
