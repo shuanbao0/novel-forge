@@ -99,7 +99,7 @@ class ChapterPlanItem(BaseModel):
 
 class OutlineExpansionRequest(BaseModel):
     """大纲展开为多章节的请求模型（outline_id从路径参数获取）"""
-    target_chapter_count: int = Field(3, description="目标章节数", ge=1, le=10)
+    target_chapter_count: int = Field(3, description="目标章节数", ge=1, le=30)
     expansion_strategy: str = Field("balanced", description="展开策略: balanced(均衡), climax(高潮重点), detail(细节丰富)")
     enable_scene_analysis: bool = Field(False, description="是否包含场景规划")
     auto_create_chapters: bool = Field(True, description="是否自动创建章节记录")
@@ -122,7 +122,7 @@ class BatchOutlineExpansionRequest(BaseModel):
     """批量大纲展开请求模型"""
     project_id: str = Field(..., description="项目ID")
     outline_ids: Optional[list[str]] = Field(None, description="要展开的大纲ID列表(为空则展开所有)")
-    chapters_per_outline: int = Field(3, description="每个大纲的目标章节数", ge=1, le=10)
+    chapters_per_outline: int = Field(3, description="每个大纲的目标章节数", ge=1, le=30)
     expansion_strategy: str = Field("balanced", description="展开策略")
     enable_scene_analysis: bool = Field(False, description="是否包含场景规划")
     auto_create_chapters: bool = Field(True, description="是否自动创建章节记录")

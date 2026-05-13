@@ -984,21 +984,34 @@ export default function Outline() {
               form={expansionForm}
               layout="vertical"
               initialValues={{
-                target_chapter_count: 3,
+                target_chapter_count: 10,
                 expansion_strategy: 'balanced',
+                batch_size: 10,
               }}
             >
               <Form.Item
                 label="目标章节数"
                 name="target_chapter_count"
                 rules={[{ required: true, message: '请输入目标章节数' }]}
-                tooltip="将这个大纲展开为几章内容"
+                tooltip="本卷想要展开多少章。超过批次大小会自动分批生成,批次之间会传递上下文保持连贯。"
               >
                 <InputNumber
                   min={2}
-                  max={10}
+                  max={30}
                   style={{ width: '100%' }}
-                  placeholder="建议2-5章"
+                  placeholder="主流网文铺垫卷 20-30 章,主线卷 30+ 章"
+                />
+              </Form.Item>
+
+              <Form.Item
+                label="批次大小"
+                name="batch_size"
+                tooltip="单次 AI 调用规划的章节数。超过此数会自动分批,每批独立调 AI 并参考前批结果。建议 5-10,大于 10 单批质量会下降。"
+              >
+                <InputNumber
+                  min={3}
+                  max={15}
+                  style={{ width: '100%' }}
                 />
               </Form.Item>
 
