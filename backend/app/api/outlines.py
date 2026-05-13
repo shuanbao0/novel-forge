@@ -1923,16 +1923,7 @@ async def _run_new_outline_bg(
         if old_outlines:
             old_outline_ids = [o.id for o in old_outlines]
 
-            # 清理旧章节
-            old_chapters_result = await db.execute(
-                select(Chapter).where(
-                    Chapter.project_id == project_id,
-                    ~Chapter.id.in_([ch.id for ch in await db.execute(
-                        select(Chapter).where(Chapter.outline_id.in_(new_outline_ids) if new_outline_ids else False)
-                    ).scalars().all()] if new_outline_ids else [])
-                )
-            )
-            # 简化：删除不属于新大纲的旧章节
+            # 清理旧章节：删除不属于新大纲的旧章节
             # 先获取新大纲对应的章节（one-to-one模式下通过chapter_number匹配）
             new_order_indexes = [o.order_index for o in outlines]
 
