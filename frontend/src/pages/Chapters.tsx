@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, Progress, theme } from 'antd';
-import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme } from 'antd';
+import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
 import { eventBus } from '../store/eventBus';
 import { useChapterSync } from '../store/hooks';
@@ -110,19 +110,8 @@ export default function Chapters() {
   const [batchGenerateVisible, setBatchGenerateVisible] = useState(false);
   const [batchGenerating, setBatchGenerating] = useState(false);
   const [batchAnalyzingUnanalyzed, setBatchAnalyzingUnanalyzed] = useState(false);
-  const [batchTaskId, setBatchTaskId] = useState<string | null>(null);
   const [batchForm] = Form.useForm();
   const [manualCreateForm] = Form.useForm();
-  const [batchProgress, setBatchProgress] = useState<{
-    status: string;
-    total: number;
-    completed: number;
-    current_chapter_number: number | null;
-    current_chapter_chars: number;
-    current_chapter_target_chars: number;
-    current_chapter_phase: string;
-    estimated_time_minutes?: number;
-  } | null>(null);
   const batchPollingIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -535,19 +524,9 @@ export default function Chapters() {
       if (data.has_active_task && data.task) {
         const task = data.task;
 
-        // 恢复任务状态（只在顶部进度条显示，不弹出Modal）
-        setBatchTaskId(task.batch_id);
-        setBatchProgress({
-          status: task.status,
-          total: task.total,
-          completed: task.completed,
-          current_chapter_number: task.current_chapter_number,
-          current_chapter_chars: task.current_chapter_chars ?? 0,
-          current_chapter_target_chars: task.current_chapter_target_chars ?? 0,
-          current_chapter_phase: task.current_chapter_phase ?? 'waiting',
-        });
+        // 恢复任务状态: 进度展示交给右下角 FloatingTaskPanel,这里只标记
+        // batchGenerating 用于阻止重复打开配置 Modal,以及启动轮询监听结束事件
         setBatchGenerating(true);
-        // 不设置 setBatchGenerateVisible(true)，避免弹出Modal遮挡页面
 
         // 启动轮询
         startBatchPolling(task.batch_id);
@@ -1183,17 +1162,6 @@ export default function Chapters() {
       }
 
       const result = await response.json();
-      setBatchTaskId(result.batch_id);
-      setBatchProgress({
-        status: 'running',
-        total: result.chapters_to_generate.length,
-        completed: 0,
-        current_chapter_number: values.startChapterNumber,
-        current_chapter_chars: 0,
-        current_chapter_target_chars: values.targetWordCount ?? 0,
-        current_chapter_phase: 'waiting',
-        estimated_time_minutes: result.estimated_time_minutes,
-      });
 
       message.success(`批量生成任务已创建，预计需要 ${result.estimated_time_minutes} 分钟，可在右下角任务面板查看进度`);
       // 通知悬浮任务框刷新
@@ -1229,15 +1197,6 @@ export default function Chapters() {
         if (!response.ok) return;
 
         const status = await response.json();
-        setBatchProgress({
-          status: status.status,
-          total: status.total,
-          completed: status.completed,
-          current_chapter_number: status.current_chapter_number,
-          current_chapter_chars: status.current_chapter_chars ?? 0,
-          current_chapter_target_chars: status.current_chapter_target_chars ?? 0,
-          current_chapter_phase: status.current_chapter_phase ?? 'waiting',
-        });
 
         // 每次轮询时刷新章节列表和分析状态，实时显示新生成的章节和分析进度
         // 使用 await 确保获取最新章节列表后再加载分析任务状态
@@ -1292,12 +1251,6 @@ export default function Chapters() {
             message.warning('批量生成已取消');
           }
 
-          // 延迟关闭对话框，让用户看到最终状态
-          setTimeout(() => {
-            setBatchGenerateVisible(false);
-            setBatchTaskId(null);
-            setBatchProgress(null);
-          }, 2000);
         }
       } catch (error) {
         console.error('轮询批量生成状态失败:', error);
@@ -1311,38 +1264,14 @@ export default function Chapters() {
     batchPollingIntervalRef.current = window.setInterval(poll, 2000);
   };
 
-  // 取消批量生成
-  const handleCancelBatchGenerate = async () => {
-    if (!batchTaskId) return;
-
-    try {
-      const response = await fetch(`/api/chapters/batch-generate/${batchTaskId}/cancel`, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error('取消失败');
-      }
-
-      message.success('批量生成已取消');
-
-      // 取消后立即刷新章节列表和分析任务，显示已生成的章节
-      await refreshChapters();
-      await loadAnalysisTasks();
-
-      // 刷新项目信息以更新总字数统计
-      if (currentProject?.id) {
-        const updatedProject = await projectApi.getProject(currentProject.id);
-        setCurrentProject(updatedProject);
-      }
-    } catch (error: unknown) {
-      const err = error as Error;
-      message.error('取消失败：' + (err.message || '未知错误'));
-    }
-  };
-
   // 打开批量生成对话框
   const handleOpenBatchGenerate = async () => {
+    // 已有任务在跑时不再弹配置 Modal,引导用户去看右下角浮窗
+    if (batchGenerating) {
+      message.info('已有批量生成任务在进行中，请在右下角"后台任务"面板查看进度');
+      return;
+    }
+
     // 找到第一个未生成的章节
     const firstIncompleteChapter = sortedChapters.find(
       ch => !ch.content || ch.content.trim() === ''
@@ -2817,7 +2746,8 @@ export default function Chapters() {
         />
       )}
 
-      {/* 批量生成对话框 */}
+      {/* 批量生成配置对话框 - 仅用于配置/提交,提交后立刻关闭,
+          进度展示交给右下角 FloatingTaskPanel */}
       <Modal
         title={
           <Space>
@@ -2826,24 +2756,8 @@ export default function Chapters() {
           </Space>
         }
         open={batchGenerateVisible}
-        onCancel={() => {
-          if (batchGenerating) {
-            modal.confirm({
-              title: '确认取消',
-              content: '批量生成正在进行中，确定要取消吗？',
-              okText: '确定取消',
-              cancelText: '继续生成',
-              centered: true,
-              onOk: () => {
-                handleCancelBatchGenerate();
-                setBatchGenerateVisible(false);
-              },
-            });
-          } else {
-            setBatchGenerateVisible(false);
-          }
-        }}
-        footer={!batchGenerating ? (
+        onCancel={() => setBatchGenerateVisible(false)}
+        footer={
           <Space style={{ width: '100%', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
             <Button onClick={() => setBatchGenerateVisible(false)}>
               取消
@@ -2852,11 +2766,11 @@ export default function Chapters() {
               开始批量生成
             </Button>
           </Space>
-        ) : null}
+        }
         width={isMobile ? 'calc(100vw - 32px)' : 700}
         centered
-        closable={!batchGenerating}
-        maskClosable={!batchGenerating}
+        closable
+        maskClosable
         style={isMobile ? {
           maxWidth: 'calc(100vw - 32px)',
           margin: '0 auto',
@@ -2870,7 +2784,6 @@ export default function Chapters() {
           }
         }}
       >
-        {!batchGenerating ? (
           <Form
             form={batchForm}
             layout="vertical"
@@ -3022,97 +2935,6 @@ export default function Chapters() {
               </Form.Item>
             </div>
           </Form>
-        ) : (
-          <div>
-            {batchProgress && (() => {
-              const phaseLabels: Record<string, { text: string; color: string }> = {
-                waiting: { text: '⏳ 等待中', color: 'default' },
-                loading: { text: '📥 加载上下文', color: 'blue' },
-                generating: { text: '✍️ 创作中', color: 'processing' },
-                analyzing: { text: '🔍 分析中', color: 'gold' },
-                done: { text: '✅ 已完成', color: 'success' },
-              };
-              const phase = phaseLabels[batchProgress.current_chapter_phase] ?? phaseLabels.waiting;
-              const overallPct = batchProgress.total > 0
-                ? Math.round((batchProgress.completed / batchProgress.total) * 100)
-                : 0;
-              const charPct = batchProgress.current_chapter_target_chars > 0
-                ? Math.min(100, Math.round((batchProgress.current_chapter_chars / batchProgress.current_chapter_target_chars) * 100))
-                : 0;
-              return (
-                <Card size="small" style={{ marginBottom: 16 }}>
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                      <span style={{ fontWeight: 500 }}>整体进度</span>
-                      <span style={{ color: token.colorTextSecondary }}>
-                        {batchProgress.completed} / {batchProgress.total} 章
-                      </span>
-                    </div>
-                    <Progress percent={overallPct} status={batchProgress.status === 'failed' ? 'exception' : 'active'} />
-                  </div>
-
-                  {batchProgress.current_chapter_number != null && (
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' }}>
-                        <Space>
-                          <span style={{ fontWeight: 500 }}>第 {batchProgress.current_chapter_number} 章</span>
-                          <Tag color={phase.color}>{phase.text}</Tag>
-                        </Space>
-                        {batchProgress.current_chapter_phase === 'generating' && (
-                          <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
-                            {batchProgress.current_chapter_chars} / {batchProgress.current_chapter_target_chars} 字
-                          </span>
-                        )}
-                      </div>
-                      {batchProgress.current_chapter_phase === 'generating' && (
-                        <Progress percent={charPct} size="small" status="active" />
-                      )}
-                      {batchProgress.current_chapter_phase === 'analyzing' && (
-                        <Progress percent={100} size="small" status="active" showInfo={false} />
-                      )}
-                    </div>
-                  )}
-                </Card>
-              );
-            })()}
-
-            <Alert
-              message="温馨提示"
-              description={
-                <ul style={{ margin: '8px 0 0 0', paddingLeft: 20 }}>
-                  <li>批量生成需要一定时间，可以切换到其他页面</li>
-                  <li>关闭页面后重新打开，会自动恢复任务进度</li>
-                  <li>可以随时点击"取消任务"按钮中止生成</li>
-                  {batchProgress?.estimated_time_minutes && batchProgress.completed === 0 && (
-                    <li>⏱️ 预计耗时：约 {batchProgress.estimated_time_minutes} 分钟</li>
-                  )}
-                </ul>
-              }
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-
-            <div style={{ textAlign: 'center' }}>
-              <Button
-                danger
-                icon={<StopOutlined />}
-                onClick={() => {
-                  modal.confirm({
-                    title: '确认取消',
-                    content: '确定要取消批量生成吗？已生成的章节将保留。',
-                    okText: '确定取消',
-                    cancelText: '继续生成',
-                    okButtonProps: { danger: true },
-                    onOk: handleCancelBatchGenerate,
-                  });
-                }}
-              >
-                取消任务
-              </Button>
-            </div>
-          </div>
-        )}
       </Modal>
 
       {/* 单章节生成进度显示 */}
