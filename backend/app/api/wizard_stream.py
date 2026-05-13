@@ -1331,48 +1331,126 @@ async def outline_generator(
             requirements=outline_requirements
         )
         
-        # 流式生成大纲
-        estimated_total = 1000
+        # 流式生成大纲 —— 超过阈值时自动分批生成，保证输出质量
+        BATCH_THRESHOLD = 25
+        BATCH_SIZE = 20
+        use_batching = outline_count > BATCH_THRESHOLD
+        total_batches = (outline_count + BATCH_SIZE - 1) // BATCH_SIZE if use_batching else 1
+
+        estimated_total = max(1000, outline_count * 200)
         accumulated_text = ""
-        chunk_count = 0
-        
+        outline_data: list = []
+
         yield await tracker.generating(current_chars=0, estimated_total=estimated_total)
-        
-        async for chunk in user_ai_service.generate_text_stream(
-            prompt=outline_prompt,
-            provider=provider,
-            model=model,
-        ):
-            chunk_count += 1
-            accumulated_text += chunk
-            
-            # 发送内容块
-            yield await tracker.generating_chunk(chunk)
-            
-            # 定期更新进度
-            current_len = len(accumulated_text)
-            if chunk_count % 10 == 0:
+
+        remaining = outline_count
+        batch_idx = 0
+        while remaining > 0:
+            batch_idx += 1
+            this_batch = min(BATCH_SIZE if use_batching else outline_count, remaining)
+
+            if use_batching:
+                already_count = len(outline_data)
+                if already_count > 0:
+                    summary_lines = []
+                    for i, item in enumerate(outline_data, 1):
+                        t = (item.get("title") or "").strip()
+                        s = (item.get("summary") or item.get("content") or "").strip().replace("\n", " ")
+                        if len(s) > 60:
+                            s = s[:60] + "..."
+                        summary_lines.append(f"{i}. {t}：{s}")
+                    prev_block = "\n".join(summary_lines)
+                    batch_extra = (
+                        f"\n\n【分批生成 第 {batch_idx}/{total_batches} 批】\n"
+                        f"已生成 {already_count} 节大纲（摘要如下，请承接情节、避免重复、保持伏笔与人物一致）：\n{prev_block}\n\n"
+                        f"本批请生成第 {already_count + 1} ~ {already_count + this_batch} 节，"
+                        f"仅输出本批 {this_batch} 个节点的 JSON 数组，编号从 {already_count + 1} 起。"
+                    )
+                else:
+                    batch_extra = (
+                        f"\n\n【分批生成 第 1/{total_batches} 批】\n"
+                        f"全篇共需 {outline_count} 节，将分 {total_batches} 批生成；"
+                        f"本批输出第 1 ~ {this_batch} 节的 JSON 数组（仅 {this_batch} 个节点）。"
+                    )
+                batch_requirements = outline_requirements + batch_extra
+            else:
+                batch_requirements = outline_requirements
+
+            batch_prompt = PromptService.format_prompt(
+                template,
+                title=project.title,
+                theme=project.theme or "未设定",
+                genre=project.genre or "通用",
+                chapter_count=this_batch,
+                narrative_perspective=narrative_perspective,
+                target_words=target_words // 10,
+                time_period=project.world_time_period or "未设定",
+                location=project.world_location or "未设定",
+                atmosphere=project.world_atmosphere or "未设定",
+                rules=project.world_rules or "未设定",
+                characters_info=characters_info or "暂无角色信息",
+                mcp_references="",
+                requirements=batch_requirements,
+            )
+
+            if use_batching:
                 yield await tracker.generating(
-                    current_chars=current_len,
-                    estimated_total=estimated_total
+                    current_chars=len(accumulated_text),
+                    estimated_total=estimated_total,
+                    message=f"生成大纲中... 第 {batch_idx}/{total_batches} 批（已完成 {len(outline_data)}/{outline_count} 节）"
                 )
-            
-            # 每20个块发送心跳
-            if chunk_count % 20 == 0:
-                yield await tracker.heartbeat()
-        
-        # 解析大纲结果 - 使用统一的JSON清洗方法
-        yield await tracker.parsing("解析大纲数据...")
-        
-        try:
-            cleaned_text = user_ai_service._clean_json_response(accumulated_text)
-            outline_data = loads_json(cleaned_text)
-            if not isinstance(outline_data, list):
-                outline_data = [outline_data]
-        except json.JSONDecodeError as e:
-            logger.error(f"大纲JSON解析失败: {e}")
-            yield await tracker.error("大纲生成失败，请重试")
-            return
+
+            batch_text = ""
+            chunk_count = 0
+            async for chunk in user_ai_service.generate_text_stream(
+                prompt=batch_prompt,
+                provider=provider,
+                model=model,
+            ):
+                chunk_count += 1
+                batch_text += chunk
+                accumulated_text += chunk
+
+                yield await tracker.generating_chunk(chunk)
+
+                if chunk_count % 10 == 0:
+                    yield await tracker.generating(
+                        current_chars=len(accumulated_text),
+                        estimated_total=estimated_total,
+                        message=(f"生成大纲中... 第 {batch_idx}/{total_batches} 批" if use_batching else None)
+                    )
+                if chunk_count % 20 == 0:
+                    yield await tracker.heartbeat()
+
+            # 解析当前批
+            yield await tracker.parsing(
+                f"解析第 {batch_idx}/{total_batches} 批大纲数据..." if use_batching else "解析大纲数据..."
+            )
+            try:
+                cleaned_text = user_ai_service._clean_json_response(batch_text)
+                batch_data = loads_json(cleaned_text)
+                if not isinstance(batch_data, list):
+                    batch_data = [batch_data]
+            except json.JSONDecodeError as e:
+                logger.error(f"大纲第 {batch_idx}/{total_batches} 批 JSON 解析失败: {e}")
+                yield await tracker.error(
+                    f"大纲第 {batch_idx}/{total_batches} 批生成失败，请重试" if use_batching else "大纲生成失败，请重试"
+                )
+                return
+
+            valid_items = [it for it in batch_data[:this_batch] if isinstance(it, dict)]
+            if not valid_items:
+                logger.error(f"大纲第 {batch_idx}/{total_batches} 批未返回有效节点")
+                yield await tracker.error(
+                    f"大纲第 {batch_idx}/{total_batches} 批未返回有效节点，请重试" if use_batching else "大纲生成结果为空，请重试"
+                )
+                return
+
+            outline_data.extend(valid_items)
+            remaining = outline_count - len(outline_data)
+
+            if use_batching:
+                logger.info(f"📦 大纲分批 {batch_idx}/{total_batches} 完成，累计 {len(outline_data)}/{outline_count} 节")
         
         # 保存大纲到数据库
         yield await tracker.saving("保存大纲到数据库...")

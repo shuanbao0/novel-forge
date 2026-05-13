@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Form, Input, InputNumber, Select, Button, Card,
@@ -24,6 +24,16 @@ export default function ProjectWizardNew() {
   const [currentStep, setCurrentStep] = useState<'form' | 'generating'>('form');
   const [generationConfig, setGenerationConfig] = useState<GenerationConfig | null>(null);
   const [resumeProjectId, setResumeProjectId] = useState<string | null>(null);
+
+  // 大纲数量推荐：按 2500 字/章估算；1→1 模式 = 章节数，1→N 模式 ≈ 章节数/10（每条情节单元约 10 章）
+  const recommendOutlineCount = (targetWords?: number, outlineMode?: string): number => {
+    const words = targetWords && targetWords > 0 ? targetWords : 100000;
+    const divisor = outlineMode === 'one-to-many' ? 25000 : 2500;
+    return Math.max(1, Math.round(words / divisor));
+  };
+
+  // 用户是否手动调整过大纲数量；调整过后不再被自动联动覆盖
+  const chapterCountTouchedRef = useRef(false);
 
   useEffect(() => {
     const handleResize = () => {
@@ -83,7 +93,7 @@ export default function ProjectWizardNew() {
       genre: values.genre,
       narrative_perspective: values.narrative_perspective,
       target_words: values.target_words || 100000,
-      chapter_count: 3, // 默认生成3章大纲
+      chapter_count: values.chapter_count || 30,
       character_count: values.character_count || 5,
       outline_mode: values.outline_mode || 'one-to-many', // 添加大纲模式
     };
@@ -117,9 +127,19 @@ export default function ProjectWizardNew() {
         form={form}
         layout="vertical"
         onFinish={handleAutoGenerate}
+        onValuesChange={(changed, all) => {
+          if ('chapter_count' in changed) {
+            chapterCountTouchedRef.current = true;
+            return;
+          }
+          if (('target_words' in changed || 'outline_mode' in changed) && !chapterCountTouchedRef.current) {
+            const recommended = recommendOutlineCount(all.target_words, all.outline_mode);
+            form.setFieldValue('chapter_count', recommended);
+          }
+        }}
         initialValues={{
           genre: ['玄幻'],
-          chapter_count: 30,
+          chapter_count: recommendOutlineCount(100000, 'one-to-one'),
           narrative_perspective: '第三人称',
           character_count: 5,
           target_words: 100000,
@@ -282,19 +302,58 @@ export default function ProjectWizardNew() {
           </Col>
         </Row>
 
-        <Form.Item
-          label="目标字数"
-          name="target_words"
-          rules={[{ required: true, message: '请输入目标字数' }]}
-        >
-          <InputNumber
-            min={10000}
-            style={{ width: '100%' }}
-            size="large"
-            addonAfter="字"
-            placeholder="整部小说的目标字数"
-          />
-        </Form.Item>
+        <Row gutter={16}>
+          <Col xs={24} sm={12}>
+            <Form.Item
+              shouldUpdate={(prev, curr) =>
+                prev.target_words !== curr.target_words || prev.outline_mode !== curr.outline_mode
+              }
+              noStyle
+            >
+              {({ getFieldValue }) => {
+                const targetWords = getFieldValue('target_words') || 100000;
+                const outlineMode = getFieldValue('outline_mode') || 'one-to-one';
+                const recommended = recommendOutlineCount(targetWords, outlineMode);
+                const tip = outlineMode === 'one-to-many'
+                  ? `推荐 ${recommended} 条（每条情节单元约 10 章，按 2500 字/章估算）`
+                  : `推荐 ${recommended} 条（一条大纲=一章，按 2500 字/章估算）`;
+                return (
+                  <Form.Item
+                    label="大纲数量"
+                    name="chapter_count"
+                    rules={[{ required: true, message: '请输入大纲数量' }]}
+                    tooltip="AI 一次生成的大纲条目数量；后续可在项目内继续展开"
+                    extra={tip}
+                  >
+                    <InputNumber
+                      min={1}
+                      max={500}
+                      style={{ width: '100%' }}
+                      size="large"
+                      addonAfter="条"
+                      placeholder="AI 生成的大纲条目数"
+                    />
+                  </Form.Item>
+                );
+              }}
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12}>
+            <Form.Item
+              label="目标字数"
+              name="target_words"
+              rules={[{ required: true, message: '请输入目标字数' }]}
+            >
+              <InputNumber
+                min={10000}
+                style={{ width: '100%' }}
+                size="large"
+                addonAfter="字"
+                placeholder="整部小说的目标字数"
+              />
+            </Form.Item>
+          </Col>
+        </Row>
 
         <Form.Item>
           <Space direction="vertical" style={{ width: '100%' }} size={12}>
