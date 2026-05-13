@@ -2705,7 +2705,26 @@ class PromptService:
 
 ---
 """)
-        
+
+        # 创作契约(硬约束) - 优先级高于风格/修改指令以外的任何要求
+        contracts_block = "\n\n".join(
+            block for block in (
+                project_context.get('project_contract_block') or "",
+                project_context.get('volume_brief_block') or "",
+                project_context.get('chapter_brief_block') or "",
+            ) if block
+        )
+        if contracts_block:
+            prompt_parts.append(f"""## 📜 创作契约 - 硬约束(违反等同劣质输出)
+
+{contracts_block}
+
+⚠️ 重写时必须自检:新版本是否触发任何 anti_patterns / forbidden_zones?
+是否仍然服务于 volume_goal 与 required_tropes?
+
+---
+""")
+
         # 角色信息
         if project_context.get('characters_info'):
             prompt_parts.append(f"""## 👥 角色信息

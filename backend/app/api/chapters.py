@@ -3851,7 +3851,17 @@ async def regenerate_chapter_stream(
                 'atmosphere': project.world_atmosphere if project else '未设定',
                 'characters_info': characters_info_with_careers,
                 'chapter_outline': outline.content if outline else chapter.summary or '暂无大纲',
-                'previous_context': ''  # 可以后续扩展添加前置章节上下文
+                'previous_context': '',  # 可以后续扩展添加前置章节上下文
+                # 创作契约 - 项目级 / 卷级 / 章级,逐级覆盖,与正文生成路径一致
+                'project_contract_block': CreativeContract.from_raw(
+                    project.creative_contract if project else None
+                ).to_prompt_block(),
+                'volume_brief_block': VolumeBrief.from_raw(
+                    outline.creative_brief if outline else None
+                ).to_prompt_block(),
+                'chapter_brief_block': ChapterBrief.from_raw(
+                    getattr(chapter, 'creative_brief', None)
+                ).to_prompt_block(),
             }
         finally:
             await temp_db.close()
