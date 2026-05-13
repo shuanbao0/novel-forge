@@ -2977,6 +2977,168 @@ async def suggest_volume_brief_stream(
     )
 
 
+def _brief_is_empty(raw: Any) -> bool:
+    """判断已存储的 creative_brief 是否视为空 (用于 overwrite=false 跳过判断)"""
+    if not raw:
+        return True
+    if not isinstance(raw, dict):
+        return False
+    goal = str(raw.get("volume_goal") or "").strip()
+    anti = raw.get("anti_patterns") or []
+    tropes = raw.get("required_tropes") or []
+    pacing = str(raw.get("pacing") or "").strip()
+    return not (goal or anti or tropes or pacing)
+
+
+async def _batch_suggest_volume_briefs_generator(
+    project_id: str,
+    hint: str | None,
+    overwrite: bool,
+    db: AsyncSession,
+    user_ai_service: AIService,
+) -> AsyncGenerator[str, None]:
+    """SSE: 项目下所有卷批量 AI 生成 brief 并即时保存到 outline.creative_brief"""
+    from app.services.brief_generator import (
+        BriefContextBuilder,
+        BriefGenerationError,
+        VolumeBriefGenerator,
+    )
+
+    tracker = WizardProgressTracker("批量卷契约")
+    try:
+        yield await tracker.start()
+        yield await tracker.loading("加载项目所有卷...", 0.3)
+
+        result = await db.execute(
+            select(Outline)
+            .where(Outline.project_id == project_id)
+            .order_by(Outline.order_index)
+        )
+        outlines = list(result.scalars().all())
+
+        if not outlines:
+            yield await tracker.error("本项目暂无卷大纲", 404)
+            return
+
+        targets = (
+            outlines if overwrite
+            else [o for o in outlines if _brief_is_empty(o.creative_brief)]
+        )
+        total = len(targets)
+        skipped = len(outlines) - total
+
+        if total == 0:
+            yield await tracker.complete("所有卷都已存在契约,无需生成 (勾选覆盖可强制重生)")
+            yield await tracker.result({
+                "processed": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "skipped": skipped,
+                "items": [],
+            })
+            yield await tracker.done()
+            return
+
+        generator = VolumeBriefGenerator(user_ai_service)
+        items: list[dict] = []
+        succeeded = 0
+        failed = 0
+
+        for idx, outline in enumerate(targets, start=1):
+            done_chars = int(800 * (idx - 1))
+            total_chars = max(800 * total, 1)
+            yield await tracker.generating(
+                current_chars=done_chars,
+                estimated_total=total_chars,
+                message=f"({idx}/{total}) 生成《{outline.title}》卷契约...",
+            )
+
+            try:
+                ctx = await BriefContextBuilder.build(outline.id, db)
+                brief = await generator.generate(ctx, user_hint=hint)
+
+                outline.creative_brief = brief
+                await db.commit()
+                await db.refresh(outline)
+
+                succeeded += 1
+                items.append({
+                    "outline_id": outline.id,
+                    "title": outline.title,
+                    "order_index": outline.order_index,
+                    "status": "success",
+                })
+                logger.info(f"批量卷契约: ({idx}/{total}) 《{outline.title}》生成并保存成功")
+            except BriefGenerationError as e:
+                await db.rollback()
+                failed += 1
+                items.append({
+                    "outline_id": outline.id,
+                    "title": outline.title,
+                    "order_index": outline.order_index,
+                    "status": "failed",
+                    "error": f"AI 输出无法解析: {e}",
+                })
+                logger.warning(f"批量卷契约: ({idx}/{total}) 《{outline.title}》解析失败: {e}")
+            except Exception as e:
+                await db.rollback()
+                failed += 1
+                items.append({
+                    "outline_id": outline.id,
+                    "title": outline.title,
+                    "order_index": outline.order_index,
+                    "status": "failed",
+                    "error": str(e),
+                })
+                logger.exception(f"批量卷契约: ({idx}/{total}) 《{outline.title}》异常")
+
+        yield await tracker.complete(
+            f"完成: 成功 {succeeded} / 失败 {failed} / 跳过 {skipped}"
+        )
+        yield await tracker.result({
+            "processed": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "items": items,
+        })
+        yield await tracker.done()
+    except Exception as e:
+        logger.exception("批量卷契约生成异常")
+        yield await tracker.error(f"批量生成失败: {e}", 500)
+
+
+@router.post(
+    "/project/{project_id}/batch-suggest-briefs-stream",
+    summary="批量 AI 生成本项目所有卷的卷级契约并保存(SSE)",
+)
+async def batch_suggest_volume_briefs_stream(
+    project_id: str,
+    data: Dict[str, Any],
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service),
+):
+    """遍历项目下所有卷,为每个卷生成 brief 并即时保存到 outline.creative_brief。
+
+    - 请求体: {"hint": "可选的总体引导", "overwrite": false}
+    - overwrite=false (默认): 跳过已存在非空契约的卷
+    - 每个卷生成成功即提交事务,部分失败不影响其余卷
+    - SSE result 事件返回 {processed, succeeded, failed, skipped, items[]}
+    """
+    user_id = getattr(request.state, "user_id", None)
+    await verify_project_access(project_id, user_id, db)
+
+    hint = (data or {}).get("hint")
+    overwrite = bool((data or {}).get("overwrite", False))
+
+    return create_sse_response(
+        _batch_suggest_volume_briefs_generator(
+            project_id, hint, overwrite, db, user_ai_service
+        )
+    )
+
+
 @router.get("/{outline_id}/chapters", summary="获取大纲关联的章节")
 async def get_outline_chapters(
     outline_id: str,

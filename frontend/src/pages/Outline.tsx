@@ -1,5 +1,5 @@
 ﻿import { useState, useEffect, useMemo } from 'react';
-import { Button, List, Modal, Form, Input, message, Empty, Space, Popconfirm, Card, Select, Radio, Tag, InputNumber, Tabs, Pagination, theme } from 'antd';
+import { Button, List, Modal, Form, Input, message, Empty, Space, Popconfirm, Card, Select, Radio, Tag, InputNumber, Tabs, Pagination, theme, Switch, Progress } from 'antd';
 import { EditOutlined, DeleteOutlined, ThunderboltOutlined, BranchesOutlined, AppstoreAddOutlined, CheckCircleOutlined, ExclamationCircleOutlined, PlusOutlined, FileTextOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import BriefEditor from '../components/BriefEditor';
 import { useStore } from '../store';
@@ -130,6 +130,27 @@ export default function Outline() {
 
   // 卷级契约编辑
   const [briefTargetOutlineId, setBriefTargetOutlineId] = useState<string | null>(null);
+
+  // 批量生成卷契约 Modal 状态
+  const [batchBriefOpen, setBatchBriefOpen] = useState(false);
+  const [batchBriefHint, setBatchBriefHint] = useState('');
+  const [batchBriefOverwrite, setBatchBriefOverwrite] = useState(false);
+  const [batchBriefRunning, setBatchBriefRunning] = useState(false);
+  const [batchBriefProgress, setBatchBriefProgress] = useState(0);
+  const [batchBriefMessage, setBatchBriefMessage] = useState('');
+  const [batchBriefResult, setBatchBriefResult] = useState<{
+    processed: number;
+    succeeded: number;
+    failed: number;
+    skipped: number;
+    items: Array<{
+      outline_id: string;
+      title: string;
+      order_index: number;
+      status: 'success' | 'failed' | 'skipped';
+      error?: string;
+    }>;
+  } | null>(null);
 
   useEffect(() => {
     const handleResize = () => {
@@ -1356,6 +1377,46 @@ export default function Outline() {
     });
   };
 
+  // 批量生成所有卷的卷契约 (SSE)
+  const handleBatchSuggestBriefs = async () => {
+    if (!currentProject?.id) return;
+    setBatchBriefRunning(true);
+    setBatchBriefProgress(0);
+    setBatchBriefMessage('准备生成...');
+    setBatchBriefResult(null);
+    try {
+      const res = await outlineApi.batchSuggestVolumeBriefs(
+        currentProject.id,
+        { hint: batchBriefHint, overwrite: batchBriefOverwrite },
+        {
+          onProgress: (msg, progress) => {
+            setBatchBriefMessage(msg);
+            setBatchBriefProgress(progress);
+          },
+          onError: (err) => message.error(err || '批量生成失败'),
+        }
+      );
+      if (res) {
+        setBatchBriefResult(res);
+        if (res.succeeded > 0) {
+          message.success(
+            `已生成 ${res.succeeded} 个卷契约` +
+              (res.failed ? `,失败 ${res.failed}` : '') +
+              (res.skipped ? `,跳过 ${res.skipped}` : '')
+          );
+          await refreshOutlines();
+          eventBus.emit('outline:updated');
+        } else if (res.skipped > 0 && res.processed === 0) {
+          message.info(`已有 ${res.skipped} 个卷存在契约,如需重生请勾选"覆盖已有契约"`);
+        }
+      }
+    } catch (err) {
+      console.error('批量生成卷契约失败:', err);
+    } finally {
+      setBatchBriefRunning(false);
+    }
+  };
+
   // 批量展开所有大纲 - 提交后台任务并在悬浮任务面板显示进度
   const handleBatchExpandOutlines = () => {
     if (!currentProject?.id || outlines.length === 0) {
@@ -1527,6 +1588,23 @@ export default function Outline() {
                 title="将所有大纲展开为多章，实现从大纲到章节的一对多关系"
               >
                 {isMobile ? '批量展开' : '批量展开为多章'}
+              </Button>
+            )}
+            {outlines.length > 0 && (
+              <Button
+                icon={<SafetyCertificateOutlined />}
+                onClick={() => {
+                  setBatchBriefHint('');
+                  setBatchBriefOverwrite(false);
+                  setBatchBriefProgress(0);
+                  setBatchBriefMessage('');
+                  setBatchBriefResult(null);
+                  setBatchBriefOpen(true);
+                }}
+                disabled={isGenerating || batchBriefRunning}
+                title="为本项目所有卷批量 AI 生成卷契约并保存"
+              >
+                {isMobile ? '批量卷契约' : '批量生成卷契约'}
               </Button>
             )}
           </Space>
@@ -2380,6 +2458,117 @@ export default function Outline() {
           />
         );
       })()}
+
+      {/* 批量生成卷契约 */}
+      <Modal
+        title={<Space><SafetyCertificateOutlined />批量生成卷契约</Space>}
+        open={batchBriefOpen}
+        width={560}
+        maskClosable={!batchBriefRunning}
+        closable={!batchBriefRunning}
+        onCancel={() => setBatchBriefOpen(false)}
+        footer={
+          batchBriefResult ? (
+            <Button type="primary" onClick={() => setBatchBriefOpen(false)}>
+              关闭
+            </Button>
+          ) : (
+            <Space>
+              <Button onClick={() => setBatchBriefOpen(false)} disabled={batchBriefRunning}>
+                取消
+              </Button>
+              <Button
+                type="primary"
+                icon={<ThunderboltOutlined />}
+                loading={batchBriefRunning}
+                onClick={handleBatchSuggestBriefs}
+              >
+                开始生成
+              </Button>
+            </Space>
+          )
+        }
+      >
+        {!batchBriefResult && (
+          <>
+            <div style={{ marginBottom: 12, color: token.colorTextSecondary, fontSize: 13 }}>
+              将遍历本项目所有 {outlines.length} 个卷大纲，逐个 AI 生成卷契约并自动保存。生成过程中每完成一卷即落库，部分失败不影响其他卷。
+            </div>
+            <Form layout="vertical">
+              <Form.Item label="可选: 总体引导提示">
+                <Input.TextArea
+                  rows={3}
+                  value={batchBriefHint}
+                  onChange={(e) => setBatchBriefHint(e.target.value)}
+                  placeholder="例如:整体风格偏向情感细腻;避免金手指过强"
+                  maxLength={200}
+                  disabled={batchBriefRunning}
+                />
+              </Form.Item>
+              <Form.Item>
+                <Space>
+                  <Switch
+                    checked={batchBriefOverwrite}
+                    onChange={setBatchBriefOverwrite}
+                    disabled={batchBriefRunning}
+                  />
+                  <span>覆盖已有契约</span>
+                  <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
+                    （默认仅生成尚无契约的卷）
+                  </span>
+                </Space>
+              </Form.Item>
+            </Form>
+          </>
+        )}
+
+        {batchBriefRunning && (
+          <Card size="small" style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 13, marginBottom: 6 }}>{batchBriefMessage || '生成中...'}</div>
+            <Progress percent={batchBriefProgress} size="small" status="active" />
+          </Card>
+        )}
+
+        {batchBriefResult && (
+          <div>
+            <div
+              style={{
+                padding: 12,
+                marginBottom: 12,
+                background: token.colorFillTertiary,
+                borderRadius: token.borderRadius,
+              }}
+            >
+              <Space size="large">
+                <span>处理 <strong>{batchBriefResult.processed}</strong></span>
+                <span style={{ color: token.colorSuccess }}>成功 <strong>{batchBriefResult.succeeded}</strong></span>
+                <span style={{ color: token.colorError }}>失败 <strong>{batchBriefResult.failed}</strong></span>
+                <span style={{ color: token.colorTextSecondary }}>跳过 <strong>{batchBriefResult.skipped}</strong></span>
+              </Space>
+            </div>
+            <List
+              size="small"
+              dataSource={batchBriefResult.items}
+              locale={{ emptyText: '本次未处理任何卷' }}
+              renderItem={(it) => (
+                <List.Item>
+                  <Space>
+                    {it.status === 'success' ? (
+                      <CheckCircleOutlined style={{ color: token.colorSuccess }} />
+                    ) : (
+                      <ExclamationCircleOutlined style={{ color: token.colorError }} />
+                    )}
+                    <span>第{it.order_index}卷 《{it.title}》</span>
+                    {it.error && (
+                      <span style={{ color: token.colorError, fontSize: 12 }}>— {it.error}</span>
+                    )}
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </div>
+        )}
+      </Modal>
     </>
   );
 }

@@ -599,6 +599,29 @@ export const outlineApi = {
       required_tropes: string[];
     };
   }>(`/api/outlines/${outlineId}/suggest-brief-stream`, { hint: hint ?? '' }, options),
+
+  // 批量 AI 生成本项目所有卷的卷级契约并保存 (SSE)
+  batchSuggestVolumeBriefs: (
+    projectId: string,
+    payload: { hint?: string; overwrite?: boolean },
+    options?: SSEClientOptions,
+  ) => ssePost<{
+    processed: number;
+    succeeded: number;
+    failed: number;
+    skipped: number;
+    items: Array<{
+      outline_id: string;
+      title: string;
+      order_index: number;
+      status: 'success' | 'failed' | 'skipped';
+      error?: string;
+    }>;
+  }>(
+    `/api/outlines/project/${projectId}/batch-suggest-briefs-stream`,
+    { hint: payload.hint ?? '', overwrite: !!payload.overwrite },
+    options,
+  ),
 };
 
 export const characterApi = {
