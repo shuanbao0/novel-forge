@@ -49,6 +49,65 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"后台任务表检查失败（不影响启动）: {e}")
 
+    # 回收僵尸任务：进程重启后,所有 running/pending 状态的任务对应的协程
+    # 都已丢失,把它们标记为失败/取消,避免前端永久显示"分析中""生成中".
+    # 单副本部署前提下安全;多副本横向扩展时需改为更精细的心跳检测.
+    try:
+        from datetime import datetime
+        from sqlalchemy import update
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession as _ReapSession
+        from app.models.batch_generation_task import BatchGenerationTask
+        from app.models.analysis_task import AnalysisTask
+        from app.models.regeneration_task import RegenerationTask
+
+        _now = datetime.now()
+        _reap_reason = "应用重启中断（已自动回收）"
+        _SessionMaker = async_sessionmaker(
+            _startup_engine, class_=_ReapSession, expire_on_commit=False
+        )
+
+        async with _SessionMaker() as _reap_session:
+            _statements = [
+                (
+                    "BatchGenerationTask",
+                    update(BatchGenerationTask)
+                    .where(BatchGenerationTask.status.in_(["pending", "running"]))
+                    .values(status="cancelled", completed_at=_now, error_message=_reap_reason),
+                ),
+                (
+                    "AnalysisTask",
+                    update(AnalysisTask)
+                    .where(AnalysisTask.status.in_(["pending", "running"]))
+                    .values(status="failed", completed_at=_now, error_message=_reap_reason),
+                ),
+                (
+                    "BackgroundTask",
+                    update(BackgroundTask)
+                    .where(BackgroundTask.status.in_(["pending", "running"]))
+                    .values(status="failed", completed_at=_now, error_message=_reap_reason),
+                ),
+                (
+                    "RegenerationTask",
+                    update(RegenerationTask)
+                    .where(RegenerationTask.status.in_(["pending", "running"]))
+                    .values(status="failed", error_message=_reap_reason),
+                ),
+            ]
+            _total_reaped = 0
+            for _label, _stmt in _statements:
+                try:
+                    _result = await _reap_session.execute(_stmt)
+                    if _result.rowcount > 0:
+                        logger.info(f"🧹 回收僵尸任务 {_label}: {_result.rowcount} 条")
+                        _total_reaped += _result.rowcount
+                except Exception as _reap_err:
+                    logger.warning(f"⚠️ 回收 {_label} 失败（跳过）: {_reap_err}")
+            await _reap_session.commit()
+            if _total_reaped == 0:
+                logger.info("🧹 启动僵尸任务回收: 无需清理")
+    except Exception as e:
+        logger.warning(f"⚠️ 启动僵尸任务回收失败（不影响启动）: {e}")
+
     logger.info("应用启动完成")
 
     yield
