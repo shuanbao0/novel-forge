@@ -138,19 +138,21 @@ class SyncAnalyzeHook:
 
     与 ScheduleAnalysisHook 的区别:
     - ScheduleAnalysisHook: 通过 ctx.schedule() 异步 fire-and-forget(单章场景适用)
-    - SyncAnalyzeHook: 直接 await + 内置指数退避重试,失败抛异常
+    - SyncAnalyzeHook: 直接 await analyze_chapter_background, 失败抛异常
 
     批量场景下下一章生成依赖上一章的分析结果(职业更新、记忆投影、剧情连贯),
     必须等本章分析完才能继续,否则下一章上下文质量会断崖式下降。
 
+    重试策略: 不在本 Hook 层做重试 —— PlotAnalyzer.analyze_chapter 内部已有
+    3 次指数退避,在外层重复重试会变成 3×3=9 次 LLM 调用,长章节场景下整批
+    可能挂十几分钟。失败直接 raise, 由 raise_on_error 把异常上抛, 外层批量
+    循环按 task.max_retries 决定是否重试整章。
+
     依赖: 必须在 CreateAnalysisTaskHook 之后注册以读取 analysis_task_id。
-    Pipeline 注册时把本 hook 加入 raise_on_error,失败才能中断整批生成。
+    Pipeline 注册时把本 hook 加入 raise_on_error。
     """
 
     name = "sync_analyze"
-
-    def __init__(self, max_retries: int = 3):
-        self.max_retries = max_retries
 
     async def run(self, ctx: PostGenContext) -> None:
         task_id = ctx.metadata.get("analysis_task_id")
@@ -163,34 +165,21 @@ class SyncAnalyzeHook:
         # 延迟导入以避免循环依赖(analyze_chapter_background 位于 api 层)
         from app.api.chapters import analyze_chapter_background
 
-        last_err: Optional[str] = None
-        for attempt in range(self.max_retries):
-            if attempt > 0:
-                wait = min(2 ** attempt, 10)
-                logger.warning(
-                    f"⏳ 章节分析失败,等待 {wait}s 后重试 "
-                    f"({attempt + 1}/{self.max_retries})"
-                )
-                await asyncio.sleep(wait)
-            try:
-                ok = await analyze_chapter_background(
-                    chapter_id=ctx.chapter_id,
-                    user_id=ctx.user_id,
-                    project_id=ctx.project_id,
-                    task_id=task_id,
-                    ai_service=ctx.ai_service,
-                )
-                if ok:
-                    ctx.metadata["sync_analyze_ok"] = True
-                    logger.info(f"✅ 同步章节分析成功: chapter={ctx.chapter_id}")
-                    return
-                last_err = "analyze_chapter_background returned False"
-            except Exception as exc:
-                last_err = str(exc)
-                logger.error(f"❌ 同步章节分析异常: {exc}")
+        ok = await analyze_chapter_background(
+            chapter_id=ctx.chapter_id,
+            user_id=ctx.user_id,
+            project_id=ctx.project_id,
+            task_id=task_id,
+            ai_service=ctx.ai_service,
+        )
+        if ok:
+            ctx.metadata["sync_analyze_ok"] = True
+            logger.info(f"✅ 同步章节分析成功: chapter={ctx.chapter_id}")
+            return
 
         raise RuntimeError(
-            f"章节同步分析失败(已重试 {self.max_retries} 次): {last_err}"
+            "章节同步分析失败(PlotAnalyzer 内部 3 次重试均失败), "
+            "已请求外层中断整批生成"
         )
 
 
