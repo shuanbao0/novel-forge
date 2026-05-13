@@ -28,6 +28,9 @@ class BatchGenerationTask(Base):
     failed_chapters = Column(JSON, default=list, comment="失败的章节信息列表")
     current_chapter_id = Column(String(36), comment="当前正在生成的章节ID")
     current_chapter_number = Column(Integer, comment="当前正在生成的章节序号")
+    current_chapter_chars = Column(Integer, default=0, comment="当前章节已生成字符数(实时)")
+    current_chapter_target_chars = Column(Integer, default=0, comment="当前章节目标字符数")
+    current_chapter_phase = Column(String(20), default="waiting", comment="当前章节阶段: waiting/loading/generating/analyzing/done")
     current_retry_count = Column(Integer, default=0, comment="当前章节重试次数")
     max_retries = Column(Integer, default=3, comment="最大重试次数")
     

@@ -162,6 +162,9 @@ class BatchGenerateStatusResponse(BaseModel):
     completed: int
     current_chapter_id: Optional[str] = None
     current_chapter_number: Optional[int] = None
+    current_chapter_chars: int = 0
+    current_chapter_target_chars: int = 0
+    current_chapter_phase: str = "waiting"
     current_retry_count: Optional[int] = None
     max_retries: Optional[int] = None
     failed_chapters: list[dict] = []

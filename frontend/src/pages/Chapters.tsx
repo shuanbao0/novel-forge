@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme } from 'antd';
+import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, Progress, theme } from 'antd';
 import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
 import { eventBus } from '../store/eventBus';
@@ -118,6 +118,9 @@ export default function Chapters() {
     total: number;
     completed: number;
     current_chapter_number: number | null;
+    current_chapter_chars: number;
+    current_chapter_target_chars: number;
+    current_chapter_phase: string;
     estimated_time_minutes?: number;
   } | null>(null);
   const batchPollingIntervalRef = useRef<number | null>(null);
@@ -1225,6 +1228,9 @@ export default function Chapters() {
           total: status.total,
           completed: status.completed,
           current_chapter_number: status.current_chapter_number,
+          current_chapter_chars: status.current_chapter_chars ?? 0,
+          current_chapter_target_chars: status.current_chapter_target_chars ?? 0,
+          current_chapter_phase: status.current_chapter_phase ?? 'waiting',
         });
 
         // 每次轮询时刷新章节列表和分析状态，实时显示新生成的章节和分析进度
@@ -3012,6 +3018,58 @@ export default function Chapters() {
           </Form>
         ) : (
           <div>
+            {batchProgress && (() => {
+              const phaseLabels: Record<string, { text: string; color: string }> = {
+                waiting: { text: '⏳ 等待中', color: 'default' },
+                loading: { text: '📥 加载上下文', color: 'blue' },
+                generating: { text: '✍️ 创作中', color: 'processing' },
+                analyzing: { text: '🔍 分析中', color: 'gold' },
+                done: { text: '✅ 已完成', color: 'success' },
+              };
+              const phase = phaseLabels[batchProgress.current_chapter_phase] ?? phaseLabels.waiting;
+              const overallPct = batchProgress.total > 0
+                ? Math.round((batchProgress.completed / batchProgress.total) * 100)
+                : 0;
+              const charPct = batchProgress.current_chapter_target_chars > 0
+                ? Math.min(100, Math.round((batchProgress.current_chapter_chars / batchProgress.current_chapter_target_chars) * 100))
+                : 0;
+              return (
+                <Card size="small" style={{ marginBottom: 16 }}>
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontWeight: 500 }}>整体进度</span>
+                      <span style={{ color: token.colorTextSecondary }}>
+                        {batchProgress.completed} / {batchProgress.total} 章
+                      </span>
+                    </div>
+                    <Progress percent={overallPct} status={batchProgress.status === 'failed' ? 'exception' : 'active'} />
+                  </div>
+
+                  {batchProgress.current_chapter_number != null && (
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' }}>
+                        <Space>
+                          <span style={{ fontWeight: 500 }}>第 {batchProgress.current_chapter_number} 章</span>
+                          <Tag color={phase.color}>{phase.text}</Tag>
+                        </Space>
+                        {batchProgress.current_chapter_phase === 'generating' && (
+                          <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
+                            {batchProgress.current_chapter_chars} / {batchProgress.current_chapter_target_chars} 字
+                          </span>
+                        )}
+                      </div>
+                      {batchProgress.current_chapter_phase === 'generating' && (
+                        <Progress percent={charPct} size="small" status="active" />
+                      )}
+                      {batchProgress.current_chapter_phase === 'analyzing' && (
+                        <Progress percent={100} size="small" status="active" showInfo={false} />
+                      )}
+                    </div>
+                  )}
+                </Card>
+              );
+            })()}
+
             <Alert
               message="温馨提示"
               description={

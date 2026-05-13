@@ -133,6 +133,67 @@ class ScheduleAnalysisHook:
         logger.info(f"⏳ 已调度后台分析任务: {task_id}")
 
 
+class SyncAnalyzeHook:
+    """同步阻塞执行章节分析(批量场景专用)
+
+    与 ScheduleAnalysisHook 的区别:
+    - ScheduleAnalysisHook: 通过 ctx.schedule() 异步 fire-and-forget(单章场景适用)
+    - SyncAnalyzeHook: 直接 await + 内置指数退避重试,失败抛异常
+
+    批量场景下下一章生成依赖上一章的分析结果(职业更新、记忆投影、剧情连贯),
+    必须等本章分析完才能继续,否则下一章上下文质量会断崖式下降。
+
+    依赖: 必须在 CreateAnalysisTaskHook 之后注册以读取 analysis_task_id。
+    Pipeline 注册时把本 hook 加入 raise_on_error,失败才能中断整批生成。
+    """
+
+    name = "sync_analyze"
+
+    def __init__(self, max_retries: int = 3):
+        self.max_retries = max_retries
+
+    async def run(self, ctx: PostGenContext) -> None:
+        task_id = ctx.metadata.get("analysis_task_id")
+        if not task_id:
+            raise RuntimeError(
+                "SyncAnalyzeHook 缺少 analysis_task_id "
+                "(请确保 CreateAnalysisTaskHook 在它之前注册且执行成功)"
+            )
+
+        # 延迟导入以避免循环依赖(analyze_chapter_background 位于 api 层)
+        from app.api.chapters import analyze_chapter_background
+
+        last_err: Optional[str] = None
+        for attempt in range(self.max_retries):
+            if attempt > 0:
+                wait = min(2 ** attempt, 10)
+                logger.warning(
+                    f"⏳ 章节分析失败,等待 {wait}s 后重试 "
+                    f"({attempt + 1}/{self.max_retries})"
+                )
+                await asyncio.sleep(wait)
+            try:
+                ok = await analyze_chapter_background(
+                    chapter_id=ctx.chapter_id,
+                    user_id=ctx.user_id,
+                    project_id=ctx.project_id,
+                    task_id=task_id,
+                    ai_service=ctx.ai_service,
+                )
+                if ok:
+                    ctx.metadata["sync_analyze_ok"] = True
+                    logger.info(f"✅ 同步章节分析成功: chapter={ctx.chapter_id}")
+                    return
+                last_err = "analyze_chapter_background returned False"
+            except Exception as exc:
+                last_err = str(exc)
+                logger.error(f"❌ 同步章节分析异常: {exc}")
+
+        raise RuntimeError(
+            f"章节同步分析失败(已重试 {self.max_retries} 次): {last_err}"
+        )
+
+
 class ChapterReviewHook:
     """章节审稿 Hook - 调度多维度审稿(Phase 2)
 
@@ -245,8 +306,15 @@ class PostGenPipeline:
         # result == ctx.metadata, 包含 analysis_task_id 等
     """
 
-    def __init__(self, hooks: list[PostGenHook]):
+    def __init__(
+        self,
+        hooks: list[PostGenHook],
+        raise_on_error: Optional[set[str]] = None,
+    ):
         self.hooks = hooks
+        # 关键 hook 名集合: 这些 hook 失败时直接抛出,中断整条管线
+        # 其余 hook 失败默认隔离(写入 metadata['hook_errors'])
+        self.raise_on_error = raise_on_error or set()
 
     def register(self, hook: PostGenHook) -> "PostGenPipeline":
         self.hooks.append(hook)
@@ -263,6 +331,8 @@ class PostGenPipeline:
                     "error": str(exc),
                     "at": datetime.now().isoformat(),
                 })
+                if hook.name in self.raise_on_error:
+                    raise
         return ctx.metadata
 
     @classmethod
@@ -278,3 +348,30 @@ class PostGenPipeline:
             ScheduleAnalysisHook(),
             ChapterReviewHook(),
         ])
+
+    @classmethod
+    def for_batch(cls, enable_analysis: bool = True) -> "PostGenPipeline":
+        """批量生成场景的管线 - 与单章 default() 拥有相同后处理能力
+
+        与 default() 的关键差异:
+        - 用 SyncAnalyzeHook 替换 ScheduleAnalysisHook,把分析改为同步阻塞,
+          保证下一章生成时能读到本章的分析结果(职业更新/记忆投影)
+        - SyncAnalyzeHook 注册到 raise_on_error,分析失败会中断整批
+
+        当 enable_analysis=False 时只做伏笔埋入 + 快照,跳过分析与审稿。
+        """
+        if not enable_analysis:
+            return cls([
+                AutoPlantForeshadowHook(),
+                CreateChapterCommitHook(),
+            ])
+        return cls(
+            hooks=[
+                AutoPlantForeshadowHook(),
+                CreateChapterCommitHook(),
+                CreateAnalysisTaskHook(),
+                SyncAnalyzeHook(),
+                ChapterReviewHook(),
+            ],
+            raise_on_error={"sync_analyze"},
+        )
