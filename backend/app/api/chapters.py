@@ -290,7 +290,7 @@ async def update_chapter(
     if "content" in update_data:
         new_word_count = len(chapter.content) if chapter.content else 0
         chapter.word_count = new_word_count
-        
+
         # 更新项目字数
         result = await db.execute(
             select(Project).where(Project.id == chapter.project_id)
@@ -298,60 +298,58 @@ async def update_chapter(
         project = result.scalar_one_or_none()
         if project:
             project.current_words = project.current_words - old_word_count + new_word_count
-        
-        # 如果内容被清空，清理相关数据
-            if not chapter.content or chapter.content.strip() == "":
-                chapter.status = "draft"
-                
-                # 清理分析任务
-                analysis_tasks_result = await db.execute(
-                    select(AnalysisTask).where(AnalysisTask.chapter_id == chapter_id)
+
+        # 如果内容被清空，回退状态并清理上下游派生数据
+        # 否则下次 AI 创作会读到旧的记忆/伏笔造成污染,大纲也会按"已完成"计数
+        if not chapter.content or chapter.content.strip() == "":
+            chapter.status = "draft"
+
+            # 清理分析任务
+            analysis_tasks_result = await db.execute(
+                select(AnalysisTask).where(AnalysisTask.chapter_id == chapter_id)
+            )
+            for task in analysis_tasks_result.scalars().all():
+                await db.delete(task)
+
+            # 清理分析结果
+            plot_analysis_result = await db.execute(
+                select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
+            )
+            for analysis in plot_analysis_result.scalars().all():
+                await db.delete(analysis)
+
+            # 清理故事记忆（关系数据库）
+            story_memories_result = await db.execute(
+                select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
+            )
+            for memory in story_memories_result.scalars().all():
+                await db.delete(memory)
+
+            # 清理向量数据库中的记忆数据
+            try:
+                await memory_service.delete_chapter_memories(
+                    user_id=user_id,
+                    project_id=chapter.project_id,
+                    chapter_id=chapter_id
                 )
-                analysis_tasks = analysis_tasks_result.scalars().all()
-                for task in analysis_tasks:
-                    await db.delete(task)
-                
-                # 清理分析结果
-                plot_analysis_result = await db.execute(
-                    select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
+                logger.info(f"✅ 已清理章节 {chapter_id[:8]} 的向量记忆数据")
+            except Exception as e:
+                logger.warning(f"⚠️ 清理向量记忆数据失败: {str(e)}")
+
+            # 🔮 清理章节相关的分析伏笔数据
+            try:
+                foreshadow_result = await foreshadow_service.delete_chapter_foreshadows(
+                    db=db,
+                    project_id=chapter.project_id,
+                    chapter_id=chapter_id,
+                    only_analysis_source=True  # 只删除分析来源的伏笔，保留手动创建的
                 )
-                plot_analyses = plot_analysis_result.scalars().all()
-                for analysis in plot_analyses:
-                    await db.delete(analysis)
-                
-                # 清理故事记忆（关系数据库）
-                story_memories_result = await db.execute(
-                    select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
-                )
-                story_memories = story_memories_result.scalars().all()
-                for memory in story_memories:
-                    await db.delete(memory)
-                
-                # 清理向量数据库中的记忆数据
-                try:
-                    await memory_service.delete_chapter_memories(
-                        user_id=user_id,
-                        project_id=chapter.project_id,
-                        chapter_id=chapter_id
-                    )
-                    logger.info(f"✅ 已清理章节 {chapter_id[:8]} 的向量记忆数据")
-                except Exception as e:
-                    logger.warning(f"⚠️ 清理向量记忆数据失败: {str(e)}")
-                
-                # 🔮 清理章节相关的分析伏笔数据
-                try:
-                    foreshadow_result = await foreshadow_service.delete_chapter_foreshadows(
-                        db=db,
-                        project_id=chapter.project_id,
-                        chapter_id=chapter_id,
-                        only_analysis_source=True  # 只删除分析来源的伏笔，保留手动创建的
-                    )
-                    if foreshadow_result['deleted_count'] > 0:
-                        logger.info(f"🔮 已清理章节 {chapter_id[:8]} 的 {foreshadow_result['deleted_count']} 个伏笔数据")
-                except Exception as e:
-                    logger.warning(f"⚠️ 清理伏笔数据失败: {str(e)}")
-                
-                logger.info(f"🗑️ 章节 {chapter_id[:8]} 内容已清空，已清理分析、记忆和伏笔数据")
+                if foreshadow_result['deleted_count'] > 0:
+                    logger.info(f"🔮 已清理章节 {chapter_id[:8]} 的 {foreshadow_result['deleted_count']} 个伏笔数据")
+            except Exception as e:
+                logger.warning(f"⚠️ 清理伏笔数据失败: {str(e)}")
+
+            logger.info(f"🗑️ 章节 {chapter_id[:8]} 内容已清空，已清理分析、记忆和伏笔数据")
     
     await db.commit()
     await db.refresh(chapter)
