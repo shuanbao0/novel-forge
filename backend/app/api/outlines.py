@@ -846,10 +846,9 @@ def _parse_ai_response(ai_response: str, raise_on_error: bool = False) -> list:
         JSONParseError: 当raise_on_error=True且解析失败时抛出
     """
     try:
-        # 使用统一的JSON清洗方法（从AIService导入）
-        from app.services.ai_service import AIService
-        ai_service_temp = AIService()
-        cleaned_text = ai_service_temp._clean_json_response(ai_response)
+        # 使用统一的JSON清洗方法
+        from app.services.json_helper import clean_json_response
+        cleaned_text = clean_json_response(ai_response)
         
         outline_data = loads_json(cleaned_text)
         
