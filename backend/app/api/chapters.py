@@ -3351,19 +3351,22 @@ async def generate_single_chapter_for_batch(
     # 🔗 批量后处理：通过 PostGenPipeline.for_batch() 与单章管线对齐
     # enable_analysis=True 时跑全套(伏笔+快照+分析+审稿),分析改为同步以保证
     # 下一章上下文已包含本章分析结果;分析失败会从此处抛出,触发外层中断整批。
-    async with write_lock:
-        await PostGenPipeline.for_batch(enable_analysis=enable_analysis).execute(
-            PostGenContext(
-                chapter_id=chapter.id,
-                project_id=chapter.project_id,
-                user_id=user_id,
-                chapter_number=chapter.chapter_number,
-                chapter_content=full_content,
-                db=db_session,
-                ai_service=ai_service,
-                background_tasks=None,
-            )
+    #
+    # ⚠️ 不要在外层 async with write_lock 中调用 - 各 hook 内部已自管 DB 事务,
+    # 且 SyncAnalyzeHook -> analyze_chapter_background 内部会再次 acquire
+    # 同一个 write_lock(asyncio.Lock 不可重入), 双重持有会死锁。
+    await PostGenPipeline.for_batch(enable_analysis=enable_analysis).execute(
+        PostGenContext(
+            chapter_id=chapter.id,
+            project_id=chapter.project_id,
+            user_id=user_id,
+            chapter_number=chapter.chapter_number,
+            chapter_content=full_content,
+            db=db_session,
+            ai_service=ai_service,
+            background_tasks=None,
         )
+    )
 
     await _report_progress(phase="done")
     return summary_preview
