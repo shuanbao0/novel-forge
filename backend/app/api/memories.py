@@ -10,6 +10,7 @@ from app.models.project import Project
 from app.services.memory_service import memory_service
 from app.services.plot_analyzer import get_plot_analyzer
 from app.services.foreshadow_service import foreshadow_service
+from app.services.analysis_context import build_analysis_context
 from app.services.ai_service import create_user_ai_service
 from app.models.settings import Settings
 from app.logger import get_logger
@@ -79,7 +80,14 @@ async def analyze_chapter(
         )
         logger.info(f"📋 已获取{len(existing_foreshadows)}个已埋入伏笔用于分析匹配")
         
-        # 执行剧情分析（传入已有伏笔列表）
+        # P0+P1: 构造窗口上下文（前 N 章摘要 / 本章意图 / 后 M 章梗概 / 历史评分基线）
+        recent_summaries, chapter_intent, upcoming_outline, score_baseline = await build_analysis_context(
+            db=db,
+            project_id=project_id,
+            chapter=chapter,
+        )
+
+        # 执行剧情分析（传入已有伏笔列表与窗口上下文）
         analyzer = get_plot_analyzer(ai_service)
         analysis_result = await analyzer.analyze_chapter(
             chapter_number=chapter.chapter_number,
@@ -88,7 +96,11 @@ async def analyze_chapter(
             word_count=chapter.word_count or len(chapter.content),
             user_id=user_id,
             db=db,
-            existing_foreshadows=existing_foreshadows
+            existing_foreshadows=existing_foreshadows,
+            recent_summaries=recent_summaries,
+            chapter_intent=chapter_intent,
+            upcoming_outline=upcoming_outline,
+            score_baseline=score_baseline,
         )
         
         if not analysis_result:

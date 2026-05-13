@@ -56,6 +56,7 @@ from app.services.prompt_decorators import PromptContext, PromptPipeline
 from app.services.post_generation_pipeline import PostGenContext, PostGenPipeline
 from app.services.creative_contract import ChapterBrief, CreativeContract, VolumeBrief
 from app.services.plot_analyzer import PlotAnalyzer
+from app.services.analysis_context import build_analysis_context
 from app.services.memory_service import memory_service
 from app.services.foreshadow_service import foreshadow_service
 from app.services.chapter_regenerator import ChapterRegenerator
@@ -961,16 +962,29 @@ async def analyze_chapter_background(
             except Exception as callback_error:
                 logger.warning(f"⚠️ 更新重试状态失败: {callback_error}")
         
-        # 3. 使用PlotAnalyzer分析章节（传入已有伏笔列表、角色信息和重试回调）
+        # P0+P1: 构造窗口上下文（前 N 章摘要 / 本章意图 / 后 M 章梗概 / 历史评分基线）
+        recent_summaries, chapter_intent, upcoming_outline, score_baseline = await build_analysis_context(
+            db=db_session,
+            project_id=project_id,
+            chapter=chapter,
+        )
+
+        # 3. 使用PlotAnalyzer分析章节（传入已有伏笔列表、角色信息、窗口上下文和重试回调）
         analyzer = PlotAnalyzer(ai_service)
         analysis_result = await analyzer.analyze_chapter(
             chapter_number=chapter.chapter_number,
             title=chapter.title,
             content=chapter.content,
             word_count=chapter.word_count or len(chapter.content),
+            user_id=user_id,
+            db=db_session,
             existing_foreshadows=existing_foreshadows,
             on_retry=on_retry_callback,
-            characters_info=characters_info
+            characters_info=characters_info,
+            recent_summaries=recent_summaries,
+            chapter_intent=chapter_intent,
+            upcoming_outline=upcoming_outline,
+            score_baseline=score_baseline,
         )
         
         if not analysis_result:

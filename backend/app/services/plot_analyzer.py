@@ -40,11 +40,15 @@ class PlotAnalyzer:
         max_retries: int = 3,
         existing_foreshadows: Optional[List[Dict[str, Any]]] = None,
         on_retry: Optional[OnRetryCallback] = None,
-        characters_info: str = ""
+        characters_info: str = "",
+        recent_summaries: Optional[List[Dict[str, Any]]] = None,
+        chapter_intent: Optional[Dict[str, Any]] = None,
+        upcoming_outline: Optional[List[Dict[str, Any]]] = None,
+        score_baseline: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         分析单章内容（带重试机制）
-        
+
         Args:
             chapter_number: 章节号
             title: 章节标题
@@ -56,15 +60,19 @@ class PlotAnalyzer:
             existing_foreshadows: 已埋入的伏笔列表（用于回收匹配）
             on_retry: 重试时的回调函数，参数为 (当前重试次数, 最大重试次数, 等待秒数, 错误原因)
             characters_info: 项目角色信息文本（用于角色名称匹配）
-        
+            recent_summaries: 前 N 章回顾，每项 {chapter_number,title,summary}，用于节奏/连贯/重复性判断
+            chapter_intent: 本章创作意图，可含 key_events/character_focus/emotional_tone/directive/outline_text 等
+            upcoming_outline: 后续 1-2 章梗概，每项 {chapter_number,title,intent}，用于伏笔合理性判断
+            score_baseline: 前 N 章评分基线 {sample_size, averages, overall_spread, top_suggestion_tags, avg_suggestions_per_chapter}
+
         Returns:
             分析结果字典,失败返回None
         """
         logger.info(f"🔍 开始分析第{chapter_number}章: {title}")
-        
-        # 如果内容过长,截取前8000字(避免超token)
-        analysis_content = content[:8000] if len(content) > 8000 else content
-        
+
+        # P2: 长章节首尾+中段采样，避免后半段完全被忽略
+        analysis_content = self._sample_long_content(content)
+
         # 获取自定义提示词模板
         try:
             if user_id and db:
@@ -75,11 +83,18 @@ class PlotAnalyzer:
         except Exception as e:
             logger.warning(f"⚠️ 获取提示词模板失败，使用默认模板: {str(e)}")
             template = PromptService.PLOT_ANALYSIS
-        
+
         # 格式化已有伏笔列表
         foreshadows_text = self._format_existing_foreshadows(existing_foreshadows)
-        
-        # 格式化提示词
+
+        # P0: 格式化窗口上下文（前几章回顾 / 本章意图 / 后续走向）
+        recent_summaries_text = self._format_recent_summaries(recent_summaries)
+        chapter_intent_text = self._format_chapter_intent(chapter_intent)
+        upcoming_outline_text = self._format_upcoming_outline(upcoming_outline)
+        # P1: 格式化历史评分基线
+        score_baseline_text = self._format_score_baseline(score_baseline)
+
+        # 格式化提示词（新占位符在旧自定义模板中会被自动忽略，向后兼容）
         prompt = PromptService.format_prompt(
             template,
             chapter_number=chapter_number,
@@ -87,7 +102,11 @@ class PlotAnalyzer:
             word_count=word_count,
             content=analysis_content,
             existing_foreshadows=foreshadows_text,
-            characters_info=characters_info if characters_info else "（暂无角色信息）"
+            characters_info=characters_info if characters_info else "（暂无角色信息）",
+            recent_summaries=recent_summaries_text,
+            chapter_intent=chapter_intent_text,
+            upcoming_outline=upcoming_outline_text,
+            score_baseline=score_baseline_text
         )
         
         last_error = None
@@ -189,6 +208,162 @@ class PlotAnalyzer:
         logger.error(f"❌ 第{chapter_number}章分析失败: {last_error}")
         return None
     
+    def _sample_long_content(self, content: str, head: int = 4000, mid: int = 2000, tail: int = 2000) -> str:
+        """
+        P2: 长章节首尾+中段采样
+
+        当章节超过 head+mid+tail（默认 8000）字时，纯前 N 字截断会让后半段
+        完全不进入分析（连贯性/节奏后半段判断失真）。改为：
+        - 前 head 字（开篇与铺垫）
+        - 中段 mid 字（从中点居中取）
+        - 末 tail 字（收尾与钩子）
+        三段之间用明显分隔符标注，AI 能感知"中间有省略"。
+        """
+        if not content:
+            return ""
+        total = len(content)
+        budget = head + mid + tail
+        if total <= budget:
+            return content
+
+        head_part = content[:head]
+        mid_start = max(head, (total - mid) // 2)
+        mid_part = content[mid_start:mid_start + mid]
+        tail_part = content[-tail:]
+
+        omitted_before_mid = mid_start - head
+        omitted_after_mid = total - (mid_start + mid) - tail
+
+        return (
+            f"{head_part}\n"
+            f"\n【⋯⋯此处省略约 {omitted_before_mid} 字，下面为中段采样⋯⋯】\n\n"
+            f"{mid_part}\n"
+            f"\n【⋯⋯此处省略约 {omitted_after_mid} 字，下面为结尾采样⋯⋯】\n\n"
+            f"{tail_part}"
+        )
+
+    def _format_recent_summaries(self, summaries: Optional[List[Dict[str, Any]]]) -> str:
+        """P0: 格式化前 N 章回顾，用于节奏/连贯/重复性判断"""
+        if not summaries:
+            return "（暂无前序章节摘要，无法对照连贯性，请基于本章内容独立判断）"
+        lines = []
+        for s in summaries:
+            ch_num = s.get('chapter_number', '?')
+            ch_title = s.get('title', '')
+            summary = (s.get('summary') or '').strip()
+            if not summary:
+                continue
+            lines.append(f"【第{ch_num}章·{ch_title}】")
+            lines.append(summary[:400] + ('…' if len(summary) > 400 else ''))
+            lines.append("")
+        if not lines:
+            return "（前序章节存在但暂未生成摘要）"
+        return "\n".join(lines).rstrip()
+
+    def _format_chapter_intent(self, intent: Optional[Dict[str, Any]]) -> str:
+        """P0: 格式化本章创作意图（作者本来想写什么）"""
+        if not intent:
+            return "（未提供本章预设大纲/意图，请基于内容自身完整性评估）"
+        lines = []
+
+        key_events = intent.get('key_events') or []
+        if key_events:
+            lines.append("【关键事件（预期发生）】")
+            for i, ev in enumerate(key_events, 1):
+                if isinstance(ev, dict):
+                    ev_text = ev.get('content') or ev.get('description') or str(ev)
+                else:
+                    ev_text = str(ev)
+                lines.append(f"{i}. {ev_text}")
+            lines.append("")
+
+        character_focus = intent.get('character_focus') or []
+        if character_focus:
+            focus_names = [c if isinstance(c, str) else c.get('name', '') for c in character_focus]
+            lines.append(f"【角色焦点】{', '.join(n for n in focus_names if n)}")
+            lines.append("")
+
+        emotional_tone = intent.get('emotional_tone')
+        if emotional_tone:
+            lines.append(f"【预期情感基调】{emotional_tone}")
+            lines.append("")
+
+        directive = intent.get('directive')
+        if directive:
+            lines.append(f"【章级指令】{directive}")
+            lines.append("")
+
+        forbidden = intent.get('forbidden_zones')
+        if forbidden:
+            if isinstance(forbidden, list):
+                forbidden = '；'.join(str(x) for x in forbidden)
+            lines.append(f"【禁止事项】{forbidden}")
+            lines.append("")
+
+        outline_text = (intent.get('outline_text') or '').strip()
+        if outline_text:
+            lines.append("【对应大纲原文】")
+            lines.append(outline_text[:600] + ('…' if len(outline_text) > 600 else ''))
+            lines.append("")
+
+        volume_goal = intent.get('volume_goal')
+        if volume_goal:
+            lines.append(f"【所属卷目标】{volume_goal}")
+            lines.append("")
+
+        if not lines:
+            return "（已提供意图对象但内容为空）"
+        return "\n".join(lines).rstrip()
+
+    def _format_score_baseline(self, baseline: Optional[Dict[str, Any]]) -> str:
+        """P1: 格式化历史评分基线（前 N 章均值 + 高频建议标签）"""
+        if not baseline or not baseline.get('sample_size'):
+            return (
+                "（样本不足，本章为前期章节或尚无历史分析数据。请按绝对评分标准打分，"
+                "并按建议数量原始规则给出建议——不必参照基线对照）"
+            )
+        sample_size = baseline['sample_size']
+        averages = baseline.get('averages') or {}
+        spread = baseline.get('overall_spread')
+        top_tags = baseline.get('top_suggestion_tags') or []
+        avg_suggestions = baseline.get('avg_suggestions_per_chapter', 0)
+
+        def _fmt(v):
+            return f"{v:.2f}" if isinstance(v, (int, float)) else "N/A"
+
+        lines = [
+            f"【样本】最近 {sample_size} 章的分析结果作为基线",
+            f"【各维度均值】overall={_fmt(averages.get('overall'))}, "
+            f"pacing={_fmt(averages.get('pacing'))}, "
+            f"engagement={_fmt(averages.get('engagement'))}, "
+            f"coherence={_fmt(averages.get('coherence'))}",
+        ]
+        if spread is not None:
+            lines.append(f"【overall 极差】{_fmt(spread)}（基线波动幅度，用于判断本章是否反常）")
+        if top_tags:
+            tag_text = '、'.join(f"{tag}×{cnt}" for tag, cnt in top_tags)
+            lines.append(f"【高频建议标签 Top {len(top_tags)}】{tag_text}")
+            lines.append('⚠️ 若本章出现上述老问题，请明确指出「已是常见模式」；若已避免，可在建议中减免')
+        lines.append(f"【历史建议平均数量】{avg_suggestions} 条/章")
+        return '\n'.join(lines)
+
+    def _format_upcoming_outline(self, upcoming: Optional[List[Dict[str, Any]]]) -> str:
+        """P0: 格式化后续章节梗概，用于伏笔合理性判断"""
+        if not upcoming:
+            return "（暂无后续章节大纲，伏笔判断仅依据当前与已埋伏笔）"
+        lines = []
+        for u in upcoming:
+            ch_num = u.get('chapter_number', '?')
+            ch_title = u.get('title', '')
+            intent_text = (u.get('intent') or '').strip()
+            lines.append(f"【第{ch_num}章·{ch_title}】")
+            if intent_text:
+                lines.append(intent_text[:300] + ('…' if len(intent_text) > 300 else ''))
+            else:
+                lines.append("（无具体规划）")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
     def _format_existing_foreshadows(self, foreshadows: Optional[List[Dict[str, Any]]]) -> str:
         """
         格式化已有伏笔列表，用于注入到分析提示词中
