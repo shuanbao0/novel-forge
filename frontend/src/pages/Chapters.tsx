@@ -16,6 +16,7 @@ import PartialRegenerateToolbar from '../components/PartialRegenerateToolbar';
 import PartialRegenerateModal from '../components/PartialRegenerateModal';
 import BriefEditor from '../components/BriefEditor';
 import PolishModal from '../components/PolishModal';
+import BatchPolishModal from '../components/BatchPolishModal';
 import { HighlightOutlined } from '@ant-design/icons';
 
 const { TextArea } = Input;
@@ -90,6 +91,7 @@ export default function Chapters() {
   const [editingPlanChapter, setEditingPlanChapter] = useState<Chapter | null>(null);
   const [briefTargetChapterId, setBriefTargetChapterId] = useState<string | null>(null);
   const [polishTargetChapter, setPolishTargetChapter] = useState<Chapter | null>(null);
+  const [batchPolishVisible, setBatchPolishVisible] = useState(false);
 
   // 局部重写状态
   const [partialRegenerateToolbarVisible, setPartialRegenerateToolbarVisible] = useState(false);
@@ -1997,6 +1999,23 @@ export default function Chapters() {
           >
             {batchGenerating ? '生成中...' : '批量生成'}
           </Button>
+          {(() => {
+            const polishableCount = chapters.filter(c => (c.content || '').trim() !== '').length;
+            return (
+              <Button
+                type="primary"
+                icon={<HighlightOutlined />}
+                onClick={() => setBatchPolishVisible(true)}
+                disabled={polishableCount === 0}
+                block={isMobile}
+                size={isMobile ? 'middle' : 'middle'}
+                style={{ background: token.colorSuccess, borderColor: token.colorSuccess }}
+                title={polishableCount === 0 ? '暂无有正文的章节' : `可批量润色 ${polishableCount} 章`}
+              >
+                批量润色{polishableCount > 0 ? ` (${polishableCount})` : ''}
+              </Button>
+            );
+          })()}
           <Button
             type="default"
             icon={<DownloadOutlined />}
@@ -3114,6 +3133,14 @@ export default function Chapters() {
           }}
         />
       )}
+
+      {/* 批量 AI 润色 Modal */}
+      <BatchPolishModal
+        open={batchPolishVisible}
+        chapters={chapters}
+        onClose={() => setBatchPolishVisible(false)}
+        onChapterUpdated={() => eventBus.emit('chapter:updated')}
+      />
     </div>
   );
 }
