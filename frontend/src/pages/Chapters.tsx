@@ -542,6 +542,9 @@ export default function Chapters() {
           total: task.total,
           completed: task.completed,
           current_chapter_number: task.current_chapter_number,
+          current_chapter_chars: task.current_chapter_chars ?? 0,
+          current_chapter_target_chars: task.current_chapter_target_chars ?? 0,
+          current_chapter_phase: task.current_chapter_phase ?? 'waiting',
         });
         setBatchGenerating(true);
         // 不设置 setBatchGenerateVisible(true)，避免弹出Modal遮挡页面
@@ -1186,6 +1189,9 @@ export default function Chapters() {
         total: result.chapters_to_generate.length,
         completed: 0,
         current_chapter_number: values.startChapterNumber,
+        current_chapter_chars: 0,
+        current_chapter_target_chars: values.targetWordCount ?? 0,
+        current_chapter_phase: 'waiting',
         estimated_time_minutes: result.estimated_time_minutes,
       });
 

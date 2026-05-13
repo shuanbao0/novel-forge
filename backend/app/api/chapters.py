@@ -2906,6 +2906,9 @@ async def get_active_batch_generation(
             "completed": task.completed_chapters,
             "current_chapter_id": task.current_chapter_id,
             "current_chapter_number": task.current_chapter_number,
+            "current_chapter_chars": task.current_chapter_chars or 0,
+            "current_chapter_target_chars": task.current_chapter_target_chars or 0,
+            "current_chapter_phase": task.current_chapter_phase or "waiting",
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "started_at": task.started_at.isoformat() if task.started_at else None
         }
