@@ -94,20 +94,49 @@ async def get_tasks(
         )
         batch_tasks = batch_result.scalars().all()
 
+        # 阶段中文标签 - 与 BatchGenerationTask.current_chapter_phase 一致
+        _PHASE_LABEL = {
+            "waiting": "⏳ 等待中",
+            "loading": "📥 加载上下文",
+            "generating": "✍️ 创作中",
+            "analyzing": "🔍 分析中",
+            "done": "✅ 已完成",
+        }
+
         for bt in batch_tasks:
-            progress = bt.total_chapters * 100 if bt.total_chapters > 0 else 0
-            if bt.total_chapters > 0 and bt.status in ('pending', 'running'):
-                progress = int((bt.completed_chapters / bt.total_chapters) * 100)
-            elif bt.status == 'completed':
+            total = bt.total_chapters or 0
+            completed = bt.completed_chapters or 0
+            chars = bt.current_chapter_chars or 0
+            target = bt.current_chapter_target_chars or 0
+            phase = bt.current_chapter_phase or "waiting"
+
+            # 进度计算: 已完成章节 + 当前章节内的细粒度贡献,
+            # 让 FloatingTaskPanel 在单章生成期间也能看到 % 推进
+            if bt.status == 'completed':
                 progress = 100
+            elif total > 0 and bt.status in ('pending', 'running'):
+                chapter_pct = (completed / total) * 100
+                sub_pct = 0.0
+                if phase == 'generating' and target > 0:
+                    sub_pct = min(chars / target, 1.0) / total * 100
+                elif phase == 'analyzing':
+                    # 分析阶段当作本章的 80% 进度,等 done 才完整 +1 章
+                    sub_pct = 0.8 / total * 100
+                progress = int(min(chapter_pct + sub_pct, 99))
+            else:
+                progress = 0
 
             status_message = None
             if bt.status == 'running' and bt.current_chapter_number:
-                status_message = f"正在生成第 {bt.current_chapter_number} 章 ({bt.completed_chapters}/{bt.total_chapters})"
+                phase_text = _PHASE_LABEL.get(phase, phase)
+                base = f"正在生成第 {bt.current_chapter_number} 章 ({completed}/{total}) · {phase_text}"
+                if phase == 'generating' and target > 0:
+                    base += f" {chars}/{target} 字"
+                status_message = base
             elif bt.status == 'completed':
-                status_message = f"已完成 {bt.completed_chapters} 章"
+                status_message = f"已完成 {completed} 章"
             elif bt.status == 'pending':
-                status_message = f"等待中，共 {bt.total_chapters} 章"
+                status_message = f"等待中，共 {total} 章"
 
             items.append({
                 "id": bt.id,
