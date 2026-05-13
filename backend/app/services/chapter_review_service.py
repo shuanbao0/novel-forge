@@ -46,14 +46,25 @@ class ReviewContextBuilder:
         characters_info = await self._build_characters_brief(db, chapter.project_id)
         world_setting = self._build_world_setting(project)
 
-        # 装载项目契约的承诺 + Genre Profile,供 reviewer 读取
-        from app.services.creative_contract import CreativeContract
-        from app.services.genre_profiles import get_profile, profile_to_prompt_block
+        # 装载项目契约 + 卷契约 + Genre Profile,供 reviewer 读取
+        from app.services.creative_contract import CreativeContract, VolumeBrief
 
         contract = CreativeContract.from_raw(project.creative_contract if project else None)
         metadata_extra: dict = {}
         if contract.narrative_promises:
             metadata_extra["narrative_promises"] = contract.narrative_promises
+
+        # 卷契约 - 通过 chapter.outline_id 取本章所属卷
+        if getattr(chapter, "outline_id", None):
+            from app.models.outline import Outline
+            outline_obj = await db.get(Outline, chapter.outline_id)
+            if outline_obj and outline_obj.creative_brief:
+                volume_brief = VolumeBrief.from_raw(outline_obj.creative_brief)
+                if not volume_brief.is_empty():
+                    metadata_extra["volume_brief"] = volume_brief
+                    metadata_extra["volume_title"] = outline_obj.title or ""
+
+        from app.services.genre_profiles import get_profile, profile_to_prompt_block
 
         genre_profile = get_profile(project.genre if project else "")
         if genre_profile:

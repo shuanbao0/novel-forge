@@ -15,11 +15,15 @@ class PacingReviewer(BaseReviewer):
     max_issues = 4
 
     def get_user_prompt(self, ctx: ReviewContext) -> str:
-        pacing_norm = ctx.metadata_extra.get("genre_pacing") or "medium"
+        # 卷级 pacing 优先于 genre profile 默认值
+        volume_brief = ctx.metadata_extra.get("volume_brief")
+        volume_pacing = getattr(volume_brief, "pacing", "") if volume_brief else ""
+        pacing_norm = volume_pacing or ctx.metadata_extra.get("genre_pacing") or "medium"
+        pacing_source = "本卷契约" if volume_pacing else "本书类型基线"
         return f"""【任务】检查第{ctx.chapter_number}章在「{self.focus}」维度的问题。
 
 【参考】预期目标字数 ~2500-4000 字,关键转折应有 50-200 字铺垫。
-【本书类型节奏基线】{pacing_norm}(fast=情节驱动/紧凑、medium=情节情感并重、slow=日常细腻)
+【节奏基线 ({pacing_source})】{pacing_norm}(fast=情节驱动/紧凑、medium=情节情感并重、slow=日常细腻)
 
 【章节正文】
 {ctx.truncated_content()}

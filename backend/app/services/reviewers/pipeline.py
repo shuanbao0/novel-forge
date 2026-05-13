@@ -53,6 +53,7 @@ class ReviewPipeline:
         from app.services.reviewers.pacing import PacingReviewer
         from app.services.reviewers.high_point import HighPointReviewer
         from app.services.reviewers.reader_pull import ReaderPullReviewer
+        from app.services.reviewers.volume_contract import VolumeContractReviewer
 
         return cls([
             ConsistencyReviewer(ai_service),
@@ -62,6 +63,7 @@ class ReviewPipeline:
             LogicReviewer(ai_service),
             AIFlavorReviewer(ai_service),
             NarrativePromiseReviewer(ai_service),
+            VolumeContractReviewer(ai_service),
             PacingReviewer(ai_service),
             HighPointReviewer(ai_service),
             ReaderPullReviewer(ai_service),
