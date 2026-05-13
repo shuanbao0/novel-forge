@@ -9,9 +9,17 @@ from app.models.project import Project
 from app.models.character import Character
 from app.models.chapter import Chapter
 from app.services.ai_service import AIService
+from app.services.creative_contract import CreativeContract, VolumeBrief
 from app.services.json_helper import loads_json
 from app.services.prompt_service import prompt_service, PromptService
 from app.logger import get_logger
+
+
+def _build_contract_blocks(project: Project, outline: Outline) -> tuple[str, str]:
+    """读取项目级 + 卷级契约, 返回可注入 prompt 的两段文本(空则为空串)"""
+    project_block = CreativeContract.from_raw(project.creative_contract).to_prompt_block()
+    volume_block = VolumeBrief.from_raw(outline.creative_brief).to_prompt_block()
+    return project_block, volume_block
 
 logger = get_logger(__name__)
 
@@ -108,7 +116,10 @@ class PlotExpansionService:
         
         # 获取大纲上下文（前后大纲）
         context_info = await self._get_outline_context(outline, project.id, db)
-        
+
+        # 读取契约 - 项目级 + 卷级
+        project_contract_block, volume_brief_block = _build_contract_blocks(project, outline)
+
         # 获取自定义提示词模板
         template = await PromptService.get_template("OUTLINE_EXPAND_SINGLE", project.user_id, db)
         # 格式化提示词
@@ -126,6 +137,8 @@ class PlotExpansionService:
             outline_title=outline.title,
             outline_content=outline.content,
             context_info=context_info,
+            project_contract_block=project_contract_block or "(项目级契约未设置)",
+            volume_brief_block=volume_brief_block or "(本卷契约未设置)",
             strategy_instruction=expansion_strategy,
             target_chapter_count=target_chapter_count,
             scene_instruction="",  # 暂时为空
@@ -182,7 +195,10 @@ class PlotExpansionService:
         
         # 获取大纲上下文
         context_info = await self._get_outline_context(outline, project.id, db)
-        
+
+        # 读取契约 - 项目级 + 卷级(所有批次共用)
+        project_contract_block, volume_brief_block = _build_contract_blocks(project, outline)
+
         all_chapter_plans = []
         
         # 🔧 收集所有已使用的关键事件，用于防止重复
@@ -253,6 +269,8 @@ class PlotExpansionService:
                 outline_content=outline.content,
                 context_info=context_info,
                 previous_context=previous_context,
+                project_contract_block=project_contract_block or "(项目级契约未设置)",
+                volume_brief_block=volume_brief_block or "(本卷契约未设置)",
                 strategy_instruction=expansion_strategy,
                 start_index=current_start_index,
                 end_index=current_start_index + current_batch_size - 1,

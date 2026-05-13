@@ -1414,6 +1414,18 @@ class PromptService:
 氛围基调：{project_world_atmosphere}
 </project>
 
+<contracts priority="P0">
+【📜 创作契约 - 硬约束(优先级最高,违反将被视为劣质输出)】
+{project_contract_block}
+
+{volume_brief_block}
+
+⚠️ 规划每一章时必须自检:
+- 章节的 key_events 是否触发 anti_patterns / forbidden_zones?
+- 章节是否在为 required_tropes 中至少一个铺设?
+- 章节情感基调与 pacing(快/中/慢)是否相符?
+</contracts>
+
 <characters priority="P1">
 【角色信息】
 {characters_info}
@@ -1522,6 +1534,19 @@ class PromptService:
 地理位置：{project_world_location}
 氛围基调：{project_world_atmosphere}
 </project>
+
+<contracts priority="P0">
+【📜 创作契约 - 硬约束(优先级最高,违反将被视为劣质输出)】
+{project_contract_block}
+
+{volume_brief_block}
+
+⚠️ 规划每一章时必须自检:
+- 章节的 key_events 是否触发 anti_patterns / forbidden_zones?
+- 章节是否在为 required_tropes 中至少一个铺设?
+- 章节情感基调与 pacing(快/中/慢)是否相符?
+- 本批次的章节是否在朝 volume_goal 推进?
+</contracts>
 
 <characters priority="P1">
 【角色信息】
@@ -2980,19 +3005,21 @@ class PromptService:
                 "name": "大纲单批次展开",
                 "category": "情节展开",
                 "description": "将大纲节点展开为详细章节规划（单批次）",
-                "parameters": ["project_title", "project_genre", "project_theme", "project_narrative_perspective", 
-                             "project_world_time_period", "project_world_location", "project_world_atmosphere", 
-                             "characters_info", "outline_order_index", "outline_title", "outline_content", 
-                             "context_info", "strategy_instruction", "target_chapter_count", "scene_instruction", "scene_field"]
+                "parameters": ["project_title", "project_genre", "project_theme", "project_narrative_perspective",
+                             "project_world_time_period", "project_world_location", "project_world_atmosphere",
+                             "characters_info", "outline_order_index", "outline_title", "outline_content",
+                             "context_info", "project_contract_block", "volume_brief_block",
+                             "strategy_instruction", "target_chapter_count", "scene_instruction", "scene_field"]
             },
             "OUTLINE_EXPAND_MULTI": {
                 "name": "大纲分批展开",
                 "category": "情节展开",
                 "description": "将大纲节点展开为详细章节规划（分批）",
-                "parameters": ["project_title", "project_genre", "project_theme", "project_narrative_perspective", 
-                             "project_world_time_period", "project_world_location", "project_world_atmosphere", 
-                             "characters_info", "outline_order_index", "outline_title", "outline_content", 
-                             "context_info", "previous_context", "strategy_instruction", "start_index", 
+                "parameters": ["project_title", "project_genre", "project_theme", "project_narrative_perspective",
+                             "project_world_time_period", "project_world_location", "project_world_atmosphere",
+                             "characters_info", "outline_order_index", "outline_title", "outline_content",
+                             "context_info", "previous_context", "project_contract_block", "volume_brief_block",
+                             "strategy_instruction", "start_index",
                              "end_index", "target_chapter_count", "scene_instruction", "scene_field"]
             },
             "MCP_TOOL_TEST": {
