@@ -341,17 +341,204 @@ class LocationVarietyDecorator:
         return ctx
 
 
+class PacingMilestoneDecorator:
+    """卷级节奏里程碑装饰器 - 防止整本书在前几章原地踏步
+
+    数据来源: VolumeBrief.pacing_milestones (用户/规划阶段配置)
+              形式 [{"by_chapter": int, "milestone": str}, ...]
+    解决症状: 5 章 7 万字只推进一天剧情,主线迟迟不动。
+
+    分类逻辑:
+      - overdue:  by_chapter < current,但本卷至今未完成 → 写"已逾期警告"
+      - imminent: current <= by_chapter <= current + lookahead → 写"即将到期提醒"
+
+    注意: 本装饰器只做"提醒推进",并不能判断里程碑是否真的已达成
+    (那需要 PlotAnalyzer 输出 milestone_progress, 留待 Phase 2)。
+    本期通过 by_chapter 与 current_chapter 的比较给出"应该推进"的硬约束。
+    """
+
+    name = "pacing_milestone"
+    BLOCK_HEADER = "【🎯 本卷节奏里程碑 - 推进硬约束】"
+    DEFAULT_LOOKAHEAD = 2
+
+    def __init__(
+        self,
+        milestones: Optional[list[dict]] = None,
+        current_chapter: int = 0,
+        lookahead: int = DEFAULT_LOOKAHEAD,
+    ):
+        self.current = current_chapter
+        cleaned: list[dict] = []
+        for m in milestones or []:
+            if not isinstance(m, dict):
+                continue
+            by = m.get("by_chapter")
+            text = (m.get("milestone") or "").strip()
+            if not text or not isinstance(by, int) or by <= 0:
+                continue
+            cleaned.append({"by_chapter": by, "milestone": text})
+        cleaned.sort(key=lambda x: x["by_chapter"])
+        self.overdue = [m for m in cleaned if m["by_chapter"] < current_chapter]
+        self.imminent = [
+            m for m in cleaned
+            if current_chapter <= m["by_chapter"] <= current_chapter + lookahead
+        ]
+
+    def _is_active(self) -> bool:
+        return bool(self.overdue or self.imminent)
+
+    def apply(self, ctx: PromptContext) -> PromptContext:
+        if not self._is_active():
+            return ctx
+        lines = [self.BLOCK_HEADER]
+        if self.overdue:
+            lines.append(
+                "🚨 以下里程碑已逾期(原计划在更早章节完成),本章必须立刻推进或当章完结:"
+            )
+            for m in self.overdue:
+                lines.append(f"  - 原定第 {m['by_chapter']} 章前: {m['milestone']}")
+        if self.imminent:
+            lines.append(
+                "⏳ 以下里程碑临近,本章及随后 1-2 章需为其铺设并完成:"
+            )
+            for m in self.imminent:
+                gap = m["by_chapter"] - self.current
+                tag = "本章" if gap <= 0 else f"第 {m['by_chapter']} 章前(剩 {gap} 章)"
+                lines.append(f"  - {tag}: {m['milestone']}")
+        lines.append("❌ 严禁本章继续在原节拍内打转而不向上述里程碑推进")
+        block = "\n".join(lines)
+        ctx.system_prompt = (
+            block if not ctx.system_prompt
+            else f"{ctx.system_prompt}\n\n{block}"
+        )
+        ctx.metadata["pacing_milestone_applied"] = True
+        return ctx
+
+
+class StoryTimelineDecorator:
+    """故事时间锚装饰器 - 防止前后章故事内时间漂移
+
+    数据来源: 本章 + 上一章 expansion_plan.story_time_anchor / story_time_advance
+    解决症状: 实测第 1 章定锚 5/7,第 5 章漂到"五月底",中间只过了一天剧情。
+
+    任意一端缺数据时仅渲染另一端,两端皆缺则跳过。
+    """
+
+    name = "story_timeline"
+    BLOCK_HEADER = "【⏰ 故事时间锚 - 必须严格遵守】"
+
+    def __init__(
+        self,
+        prev_anchor: Optional[str] = None,
+        current_anchor: Optional[str] = None,
+        advance: Optional[str] = None,
+    ):
+        self.prev = (prev_anchor or "").strip()
+        self.cur = (current_anchor or "").strip()
+        self.advance = (advance or "").strip()
+
+    def _is_active(self) -> bool:
+        return bool(self.prev or self.cur)
+
+    def apply(self, ctx: PromptContext) -> PromptContext:
+        if not self._is_active():
+            return ctx
+        lines = [self.BLOCK_HEADER]
+        if self.prev:
+            lines.append(f"上一章故事内时间: {self.prev}")
+        if self.cur:
+            lines.append(f"本章应发生于:     {self.cur}")
+        if self.advance:
+            lines.append(f"本章相对上章推进: {self.advance}")
+        lines.append("❌ 严禁本章故事时间向后跳跃超过上述推进幅度")
+        lines.append("❌ 严禁出现与上述时间锚矛盾的季节/天气/时段描述")
+        lines.append("✅ 章节内的具体时间表达(几点/上午/傍晚)必须与时间锚自洽")
+        block = "\n".join(lines)
+        ctx.system_prompt = (
+            block if not ctx.system_prompt
+            else f"{ctx.system_prompt}\n\n{block}"
+        )
+        ctx.metadata["story_timeline_applied"] = True
+        return ctx
+
+
+class PlotBeatCoolingDecorator:
+    """已写桥段冷却装饰器 - 防止"老师训话/对手挑衅/主角内心独白"等事件反复重演
+
+    数据来源: PlotAnalysis.plot_points (由 PlotAnalyzer 在生成后写入,
+    每条含 content/type/impact/importance)
+    输入: recent_beats = [
+        {"chapter_number": 2, "content": "王启明当众点名训话", "type": "conflict"},
+        {"chapter_number": 2, "content": "赵凯阴阳怪气挑衅",  "type": "conflict"},
+        ...
+    ]
+
+    解决症状: 同类事件(训话/嘲讽/独白)在 2/4/5 章原样重演 - LocationVariety
+    只防"地点循环",MotifCooling 只防"短意象词"复读,中间这层"事件桥段"
+    此前没有任何反馈环。本装饰器把最近若干章的高重要度情节点列给 LLM,
+    强制要求本章推到全新事件类型。
+    """
+
+    name = "plot_beat_cooling"
+
+    MAX_BEATS = 12
+    BLOCK_HEADER = "【🔁 已写桥段冷却 - 反复演硬约束】"
+
+    def __init__(self, recent_beats: Optional[list[dict]] = None):
+        cleaned: list[dict] = []
+        for b in recent_beats or []:
+            if not isinstance(b, dict):
+                continue
+            content = (b.get("content") or "").strip()
+            if not content:
+                continue
+            cleaned.append({
+                "chapter_number": b.get("chapter_number"),
+                "content": content[:80],
+                "type": (b.get("type") or "").strip(),
+            })
+        self.recent_beats = cleaned[: self.MAX_BEATS]
+
+    def _is_active(self) -> bool:
+        return bool(self.recent_beats)
+
+    def apply(self, ctx: PromptContext) -> PromptContext:
+        if not self._is_active():
+            return ctx
+        lines = [
+            self.BLOCK_HEADER,
+            "下列情节点已在最近章节真实写过,本章必须推动到全新事件,"
+            "禁止用相同的事件类型(如反复\"老师训话/对手挑衅/主角内心回顾过往\")再演一次。",
+        ]
+        for b in self.recent_beats:
+            ch = b.get("chapter_number")
+            tag = f"第{ch}章" if ch else "近章"
+            kind = f"[{b['type']}]" if b["type"] else ""
+            lines.append(f"- {tag}{kind} {b['content']}")
+        block = "\n".join(lines)
+        ctx.system_prompt = (
+            block if not ctx.system_prompt
+            else f"{ctx.system_prompt}\n\n{block}"
+        )
+        ctx.metadata["plot_beat_cooling_applied"] = True
+        return ctx
+
+
 class AntiAIFlavorDecorator:
-    """反 AI 味装饰器 - 注入 7 条反模板化创作规则
+    """反 AI 味装饰器 - 注入两组反模板化创作规则
+
+    规则按粒度分两组,默认全启用,可分别覆盖:
+      - SENTENCE_LEVEL_RULES: 句法层(副词/形容词/陈述句),原 7 条
+      - STRUCTURAL_RULES:     段落/章级结构层(回溯段密度/内心戏连续/段首套路句),
+                              针对重生文/穿越文/回忆文常见的"段落级 AI 套路"
 
     借鉴自 webnovel-writer/agents/context-agent.md (反 AI 对策)
-    针对中文网文生成中常见的 AI 通病
     """
 
     name = "anti_ai_flavor"
 
-    # 7 条核心规则 - 可按需配置启用子集
-    DEFAULT_RULES: tuple[str, ...] = (
+    # 句法层 - 句子内部的用词/句式
+    SENTENCE_LEVEL_RULES: tuple[str, ...] = (
         "禁用模板化副词:缓缓、淡淡、微微、默默、轻轻、慢慢——用具体动作或环境暗示替代",
         "禁用情绪标签直述:不要写「他很愤怒」「她感到悲伤」,用动作、生理反应、对话节奏表现情绪",
         "禁用万能形容词:「美丽的」「神秘的」「强大的」要落到具体感官细节(她的左手有三道旧疤)",
@@ -361,8 +548,22 @@ class AntiAIFlavorDecorator:
         "动作要有物理细节:谁、用哪只手、什么角度、对方什么反应——而非抽象的「他攻击她」",
     )
 
-    def __init__(self, rules: Optional[tuple[str, ...]] = None, enabled: bool = True):
-        self.rules = rules or self.DEFAULT_RULES
+    # 结构层 - 段落与段落之间的节奏/比例
+    STRUCTURAL_RULES: tuple[str, ...] = (
+        "回溯类段落(以「前世」「记得」「想起」「那年」「当年」开头)全章合计最多 3 处,严禁连续 2 段都是回溯",
+        "主角内心独白段落不得连续超过 3 段,必须用对话/外部动作/场景切换打断后再回到内心",
+        "段首套路句「他想到」「他想起」「他记得」「他知道」全章合计最多 2 次",
+    )
+
+    def __init__(
+        self,
+        sentence_rules: Optional[tuple[str, ...]] = None,
+        structural_rules: Optional[tuple[str, ...]] = None,
+        enabled: bool = True,
+    ):
+        sl = self.SENTENCE_LEVEL_RULES if sentence_rules is None else sentence_rules
+        st = self.STRUCTURAL_RULES if structural_rules is None else structural_rules
+        self.rules: tuple[str, ...] = tuple(sl) + tuple(st)
         self.enabled = enabled
 
     def apply(self, ctx: PromptContext) -> PromptContext:
@@ -431,6 +632,9 @@ class PromptPipeline:
         narrator_voice: Optional["NarratorVoiceDecorator"] = None,
         motif_cooling: Optional["MotifCoolingDecorator"] = None,
         location_variety: Optional["LocationVarietyDecorator"] = None,
+        plot_beat_cooling: Optional["PlotBeatCoolingDecorator"] = None,
+        story_timeline: Optional["StoryTimelineDecorator"] = None,
+        pacing_milestone: Optional["PacingMilestoneDecorator"] = None,
     ) -> "PromptPipeline":
         """章节生成的标准管线(便利工厂方法)
 
@@ -445,8 +649,11 @@ class PromptPipeline:
          8. NarratorVoiceDecorator      - 主角声音年龄/时代硬约束
          9. MotifCoolingDecorator       - 已用意象冷却 / 禁用
         10. LocationVarietyDecorator    - 地点轮换硬约束(来自 PlotAnalysis)
-        11. AntiAIFlavorDecorator       - 反 AI 味
-        12. OutputFormatDecorator       - 输出指令
+        11. PlotBeatCoolingDecorator    - 已写桥段冷却(来自 PlotAnalysis.plot_points)
+        12. StoryTimelineDecorator      - 故事内时间锚(来自 expansion_plan.story_time_*)
+        13. PacingMilestoneDecorator    - 卷级节奏里程碑(来自 VolumeBrief.pacing_milestones)
+        14. AntiAIFlavorDecorator       - 反 AI 味(句法 + 结构两组规则)
+        15. OutputFormatDecorator       - 输出指令
         """
         decorators: list[PromptDecorator] = []
         if style_content:
@@ -469,6 +676,12 @@ class PromptPipeline:
             decorators.append(motif_cooling)
         if location_variety is not None and location_variety._is_active():
             decorators.append(location_variety)
+        if plot_beat_cooling is not None and plot_beat_cooling._is_active():
+            decorators.append(plot_beat_cooling)
+        if story_timeline is not None and story_timeline._is_active():
+            decorators.append(story_timeline)
+        if pacing_milestone is not None and pacing_milestone._is_active():
+            decorators.append(pacing_milestone)
         if anti_ai_enabled:
             decorators.append(AntiAIFlavorDecorator())
         decorators.append(OutputFormatDecorator())

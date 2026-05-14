@@ -252,12 +252,18 @@ class TitleRegenerationHook:
       - 原标题(作为兜底,LLM 也可以选择保留)
     生成 6-12 字的新标题。同步执行,保证下一章 recent_chapters_context 读到新值。
 
+    去重策略:
+      - 字符 bigram Jaccard 相似度作硬阈值(SIMILARITY_THRESHOLD=0.5)
+      - 首次输出与最近章标题相似度过高 → 把违规标题加入 banned, 用更高
+        temperature 重试一次。再失败则静默保留原标题。
+
     任何异常或 LLM 输出不合规时,静默保留原标题。
     """
 
     name = "title_regeneration"
 
     LOOKBACK_TITLES = 5
+    SIMILARITY_THRESHOLD = 0.5
 
     async def run(self, ctx: PostGenContext) -> None:
         from sqlalchemy import select
@@ -279,34 +285,18 @@ class TitleRegenerationHook:
                 .limit(self.LOOKBACK_TITLES)
             )
             recent_titles = [t for (t,) in recent_q.all() if t]
-
             preview = (ctx.chapter_content or "")[:800].replace("\n", " ")
-            recent_block = (
-                "、".join(recent_titles) if recent_titles else "（无）"
-            )
-            prompt = (
-                "为下面这一章重新拟一个 6-12 字的中文标题。\n"
-                "要求:\n"
-                "1. 具体、有画面、不要使用'X的Y'套路句式\n"
-                "2. 不与最近章节标题语义重复\n"
-                "3. 直接输出标题,不要任何引号、编号、解释\n\n"
-                f"当前标题(可作为参考,但鼓励改写得更精准): {current_title}\n"
-                f"最近章节标题(避免重复): {recent_block}\n\n"
-                f"本章正文片段:\n{preview}"
-            )
 
-            result = await ctx.ai_service.generate_text(
-                prompt=prompt,
-                max_tokens=60,
-                temperature=0.8,
-                auto_mcp=False,
+            new_title = await self._propose_title(
+                ctx=ctx,
+                current_title=current_title,
+                recent_titles=recent_titles,
+                preview=preview,
             )
-            raw = (result.get("content") if isinstance(result, dict) else None) or ""
-            new_title = _normalize_generated_title(raw)
-            if not _is_acceptable_title(new_title, current_title):
+            if new_title is None:
                 logger.info(
-                    f"⏭️ 标题重生跳过(LLM 输出不合规或与原标题等价): "
-                    f"chapter={ctx.chapter_number} raw={raw[:40]!r}"
+                    f"⏭️ 标题重生跳过(LLM 两次输出均不合规或相似度过高): "
+                    f"chapter={ctx.chapter_number}"
                 )
                 return
 
@@ -321,6 +311,75 @@ class TitleRegenerationHook:
             )
         except Exception as exc:
             logger.warning(f"⚠️ 标题重生失败(忽略): {exc}")
+
+    async def _propose_title(
+        self,
+        *,
+        ctx: PostGenContext,
+        current_title: str,
+        recent_titles: list[str],
+        preview: str,
+    ) -> Optional[str]:
+        """两轮请求:首轮失败时把违规标题反馈给 LLM 再试一次"""
+        banned_extra: list[str] = []
+        for attempt in (1, 2):
+            raw = await self._request_title_from_llm(
+                ctx=ctx,
+                current_title=current_title,
+                recent_titles=recent_titles,
+                preview=preview,
+                banned_extra=banned_extra,
+                temperature=0.8 if attempt == 1 else 1.0,
+            )
+            new_title = _normalize_generated_title(raw)
+            ok, reason = _is_acceptable_title(
+                new_title,
+                current_title=current_title,
+                recent_titles=recent_titles,
+                similarity_threshold=self.SIMILARITY_THRESHOLD,
+            )
+            if ok:
+                return new_title
+            logger.info(
+                f"♻️ 标题第 {attempt} 轮被拒({reason}): "
+                f"chapter={ctx.chapter_number} raw={raw[:40]!r}"
+            )
+            if new_title:
+                banned_extra.append(new_title)
+        return None
+
+    @staticmethod
+    async def _request_title_from_llm(
+        *,
+        ctx: PostGenContext,
+        current_title: str,
+        recent_titles: list[str],
+        preview: str,
+        banned_extra: list[str],
+        temperature: float,
+    ) -> str:
+        recent_block = "、".join(recent_titles) if recent_titles else "（无）"
+        banned_block = (
+            "、".join(banned_extra) if banned_extra else "（无）"
+        )
+        prompt = (
+            "为下面这一章重新拟一个 6-12 字的中文标题。\n"
+            "要求:\n"
+            "1. 具体、有画面、不要使用'X的Y'套路句式\n"
+            "2. 不与最近章节标题语义或字面重复(尤其避免共用 2 个以上汉字)\n"
+            "3. 直接输出标题,不要任何引号、编号、解释\n\n"
+            f"当前标题(可作为参考,但鼓励改写得更精准): {current_title}\n"
+            f"最近章节标题(避免重复): {recent_block}\n"
+            f"已被拒绝的候选(本轮务必避开): {banned_block}\n\n"
+            f"本章正文片段:\n{preview}"
+        )
+        result = await ctx.ai_service.generate_text(
+            prompt=prompt,
+            max_tokens=60,
+            temperature=temperature,
+            auto_mcp=False,
+        )
+        return (result.get("content") if isinstance(result, dict) else None) or ""
 
 
 def _normalize_generated_title(raw: str) -> str:
@@ -340,16 +399,79 @@ def _normalize_generated_title(raw: str) -> str:
     return s
 
 
-def _is_acceptable_title(new_title: str, current_title: str) -> bool:
-    """新标题校验:长度合规且与原标题不完全一致"""
+def _title_bigrams(s: str) -> set[str]:
+    """字符 bigram - 短中文标题做相似度的最稳定特征"""
+    s = (s or "").strip()
+    if len(s) < 2:
+        return {s} if s else set()
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """字符 bigram Jaccard 相似度,适合 6-12 字短中文标题"""
+    if not a or not b:
+        return 0.0
+    ba, bb = _title_bigrams(a), _title_bigrams(b)
+    if not ba or not bb:
+        return 0.0
+    return len(ba & bb) / len(ba | bb)
+
+
+def _shared_affix_len(a: str, b: str, *, side: str) -> int:
+    """两个串共享的前缀或后缀字符数"""
+    if not a or not b:
+        return 0
+    n = min(len(a), len(b))
+    if side == "suffix":
+        i = 0
+        while i < n and a[-1 - i] == b[-1 - i]:
+            i += 1
+        return i
+    if side == "prefix":
+        i = 0
+        while i < n and a[i] == b[i]:
+            i += 1
+        return i
+    raise ValueError(side)
+
+
+def _is_acceptable_title(
+    new_title: str,
+    *,
+    current_title: str,
+    recent_titles: list[str] = (),
+    similarity_threshold: float = 0.45,
+    affix_threshold: int = 3,
+) -> tuple[bool, str]:
+    """新标题校验:长度 + 不与原标题等价 + 与近期标题相似度低于阈值
+
+    两层去重:
+      1. bigram Jaccard ≥ similarity_threshold → 整体过近
+      2. 共享前/后缀 ≥ affix_threshold 字 → 句式套路撞车
+         (例:"黑板倒数三十天" 与 "粉笔敲响三十天" 共享后缀 "三十天" 3 字)
+
+    返回 (是否通过, 不通过原因) - 原因字符串供日志定位。
+    """
     if not new_title:
-        return False
+        return False, "空标题"
     n = len(new_title)
     if n < 4 or n > 16:
-        return False
+        return False, f"长度 {n} 超出 4-16"
     if new_title == current_title:
-        return False
-    return True
+        return False, "与原标题相同"
+    for t in recent_titles or ():
+        if not t:
+            continue
+        sim = _title_similarity(new_title, t)
+        if sim >= similarity_threshold:
+            return False, f"与《{t}》bigram 相似度 {sim:.2f}≥{similarity_threshold}"
+        suf = _shared_affix_len(new_title, t, side="suffix")
+        if suf >= affix_threshold:
+            return False, f"与《{t}》共享后缀 {suf} 字"
+        pre = _shared_affix_len(new_title, t, side="prefix")
+        if pre >= affix_threshold:
+            return False, f"与《{t}》共享前缀 {pre} 字"
+    return True, ""
 
 
 class MotifExtractionHook:

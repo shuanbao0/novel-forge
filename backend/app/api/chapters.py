@@ -1721,6 +1721,12 @@ async def generate_chapter_content_stream(
                     ("volume_brief_applied", "卷级契约"),
                     ("chapter_brief_applied", "章级契约"),
                     ("scratchpad_applied", "记忆便签"),
+                    ("character_arc_applied", "角色弧线"),
+                    ("motif_cooling_applied", "意象冷却"),
+                    ("location_variety_applied", "场景轮换"),
+                    ("plot_beat_cooling_applied", "已写桥段冷却"),
+                    ("story_timeline_applied", "故事时间锚"),
+                    ("pacing_milestone_applied", "节奏里程碑"),
                     ("anti_ai_applied", "反 AI 味强约束"),
                 ):
                     if prompt_meta.get(key):
@@ -3346,8 +3352,11 @@ def _resolve_target_word_count(chapter: Chapter, batch_default: int) -> int:
       2. batch_default(批量请求层的统一字数)
 
     边界:
-      - 下限 500 字(避免过短章节)
-      - 上限 min(batch_default * 1.5, 10000)(防止 LLM 规划写飞)
+      - 下限 max(800, batch_default * 0.7):防止规划阶段把过场章压到 1500 字
+        以下,导致全书章节字数高度不均(实测出现 batch=4000 但某章
+        estimated_words=2500,生成结果只有 5000 字,与目标章对比落差 50%+)。
+      - 上限 min(batch_default * 1.2, 8000):让规划阶段的弹性保留在 ±20% 之内,
+        防止用户设置 4000 时被悄悄放大到 6000+。
 
     解析失败或字段缺失时静默回退到 batch_default。
     """
@@ -3361,10 +3370,9 @@ def _resolve_target_word_count(chapter: Chapter, batch_default: int) -> int:
     estimated = plan.get("estimated_words") if isinstance(plan, dict) else None
     if not isinstance(estimated, (int, float)) or estimated <= 0:
         return batch_default
-    # 上限收紧到 batch * 1.2:让规划阶段的弹性保留在 ±20% 之内,
-    # 防止用户设置 4000 时被悄悄放大到 6000+
     upper = min(int(batch_default * 1.2), 8000)
-    return max(500, min(int(estimated), upper))
+    lower = max(800, int(batch_default * 0.7))
+    return max(lower, min(int(estimated), upper))
 
 
 async def generate_single_chapter_for_batch(

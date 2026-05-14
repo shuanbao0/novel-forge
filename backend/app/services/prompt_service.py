@@ -1615,6 +1615,9 @@ class PromptService:
 - 章节是否在为 required_tropes 中至少一个铺设?
 - 章节情感基调与 pacing(快/中/慢)是否相符?
 - 本批次的章节是否在朝 volume_goal 推进?
+- 本批次为第 {start_index}-{end_index} 章。若契约中存在"节奏里程碑",
+  by_chapter ≤ {end_index} 的所有里程碑必须在本批次内推进或完成,
+  严禁让本批次原地踏步而把里程碑全部留给后续批次。
 </contracts>
 
 <characters priority="P1">
@@ -1655,7 +1658,9 @@ class PromptService:
     "emotional_tone": "情感基调",
     "narrative_goal": "叙事目标",
     "conflict_type": "冲突类型",
-    "estimated_words": <根据本章重要性在 1500-5000 之间取整数，参见下方节奏分配硬约束>{subplot_field}{scene_field}
+    "estimated_words": <根据本章重要性在 1500-5000 之间取整数，参见下方节奏分配硬约束>,
+    "story_time_anchor": "本章故事内时间(具体到时段，如 '重生当日下午第二节自习'/'高考前29天清晨'/'次日傍晚')",
+    "story_time_advance": "相对上一章推进的时间跨度(如 '紧接上章'/'约 3 小时后'/'次日'/'一周后')"{subplot_field}{scene_field}
   }}
 ]
 
@@ -1665,6 +1670,8 @@ class PromptService:
 - sub_index从{start_index}开始
 - character_beats 必须覆盖 character_focus 中的每个角色,beat 描述具体行动/心境而非静态性格
 - estimated_words 必须是 1500-5000 之间的整数,严禁所有章节填同一个值
+- story_time_anchor 必须给出具体时段(不能是"某一天"这种模糊词),为下章提供时间衔接基准
+- story_time_advance 必须与 plot_summary 描述的时间跨度自洽,严禁本章只发生半小时却让下章跳到"几周后"
 </output>
 
 <constraints>

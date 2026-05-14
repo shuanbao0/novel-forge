@@ -24,8 +24,11 @@ from app.services.prompt_decorators import (
     LocationVarietyDecorator,
     MotifCoolingDecorator,
     NarratorVoiceDecorator,
+    PacingMilestoneDecorator,
+    PlotBeatCoolingDecorator,
     PromptContext,
     PromptPipeline,
+    StoryTimelineDecorator,
 )
 from app.services.prompt_service import PromptService
 
@@ -244,6 +247,75 @@ async def _build_location_variety_decorator(
     return LocationVarietyDecorator(recent_locations=locations)
 
 
+async def _build_plot_beat_cooling_decorator(
+    db: AsyncSession,
+    project_id: str,
+    chapter_number: int,
+) -> Optional[PlotBeatCoolingDecorator]:
+    """从最近 5 章 PlotAnalysis.plot_points 抽事件桥段,构造装饰器。
+
+    数据契约: PlotAnalyzer 写入的 plot_points 形如
+        [{"content": "...", "type": "...", "importance": 0.9, "impact": "..."}]
+    本函数只取 importance >= 0.6 的"高重要度桥段",每章最多 4 条,
+    避免 prompt 注入过长稀释主任务。
+
+    无数据 / 第一章 / 查询失败 时返回 None,管线无感跳过。
+    """
+    if chapter_number <= 1:
+        return None
+    try:
+        analyses = await _fetch_recent_plot_analyses(db, project_id, chapter_number, lookback=5)
+    except Exception as exc:
+        logger.warning(f"⚠️ 已写桥段读取失败(跳过): {exc}")
+        return None
+    if not analyses:
+        return None
+
+    pa_to_chapter: dict[str, int] = {}
+    from sqlalchemy import select
+    from app.models.chapter import Chapter
+    from app.models.memory import PlotAnalysis
+
+    lower = max(1, chapter_number - 5)
+    q = await db.execute(
+        select(PlotAnalysis.id, Chapter.chapter_number)
+        .join(Chapter, Chapter.id == PlotAnalysis.chapter_id)
+        .where(Chapter.project_id == project_id)
+        .where(Chapter.chapter_number >= lower)
+        .where(Chapter.chapter_number < chapter_number)
+    )
+    for pid, ch_num in q.all():
+        pa_to_chapter[pid] = ch_num
+
+    beats: list[dict] = []
+    PER_CHAPTER_CAP = 4
+    for pa in analyses:
+        ch_num = pa_to_chapter.get(pa.id)
+        points = pa.plot_points or []
+        if not isinstance(points, list):
+            continue
+        kept = 0
+        for p in points:
+            if not isinstance(p, dict):
+                continue
+            if (p.get("importance") or 0) < 0.6:
+                continue
+            content = (p.get("content") or "").strip()
+            if not content:
+                continue
+            beats.append({
+                "chapter_number": ch_num,
+                "content": content,
+                "type": (p.get("type") or "").strip(),
+            })
+            kept += 1
+            if kept >= PER_CHAPTER_CAP:
+                break
+    if not beats:
+        return None
+    return PlotBeatCoolingDecorator(recent_beats=beats)
+
+
 async def _build_motif_cooling_decorator(
     db: AsyncSession,
     project_id: str,
@@ -270,6 +342,80 @@ async def _build_motif_cooling_decorator(
     if not cooling and not banned:
         return None
     return MotifCoolingDecorator(cooling=cooling, banned=banned)
+
+
+def _extract_time_fields(raw_plan) -> tuple[str, str]:
+    """从一个 expansion_plan(JSON 串或 dict)取出 (anchor, advance) 文本。
+
+    任意失败/缺失都返回 ("", ""),由装饰器层做"两端皆空就跳过"的判断。
+    """
+    if not raw_plan:
+        return "", ""
+    try:
+        import json as _json
+        plan = _json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+    except (TypeError, ValueError):
+        return "", ""
+    if not isinstance(plan, dict):
+        return "", ""
+    return (
+        (plan.get("story_time_anchor") or "").strip(),
+        (plan.get("story_time_advance") or "").strip(),
+    )
+
+
+def _build_pacing_milestone_decorator(
+    volume_brief: VolumeBrief,
+    chapter_number: int,
+) -> Optional[PacingMilestoneDecorator]:
+    """从 VolumeBrief.pacing_milestones 构造装饰器.
+
+    无配置或装饰器分类后两组都为空时返回 None,工厂自动跳过。
+    """
+    milestones = volume_brief.pacing_milestones if volume_brief else []
+    if not milestones:
+        return None
+    deco = PacingMilestoneDecorator(
+        milestones=milestones,
+        current_chapter=chapter_number,
+    )
+    return deco if deco._is_active() else None
+
+
+async def _build_story_timeline_decorator(
+    db: AsyncSession,
+    project_id: str,
+    chapter: "Chapter",
+) -> Optional[StoryTimelineDecorator]:
+    """读取本章 + 上一章 expansion_plan 的时间锚字段,构造装饰器。
+
+    第一章只有"本章锚",上一章字段缺失时只渲染本章。
+    旧 expansion_plan 没有 story_time_* 字段时,装饰器整体跳过。
+    """
+    cur_anchor, cur_advance = _extract_time_fields(getattr(chapter, "expansion_plan", None))
+    prev_anchor = ""
+    if chapter.chapter_number > 1:
+        from sqlalchemy import select
+        from app.models.chapter import Chapter as _Chapter
+        try:
+            q = await db.execute(
+                select(_Chapter.expansion_plan)
+                .where(_Chapter.project_id == project_id)
+                .where(_Chapter.chapter_number < chapter.chapter_number)
+                .order_by(_Chapter.chapter_number.desc())
+                .limit(1)
+            )
+            row = q.scalar_one_or_none()
+            prev_anchor, _ = _extract_time_fields(row)
+        except Exception as exc:
+            logger.warning(f"⚠️ 上一章时间锚读取失败(跳过): {exc}")
+    if not (cur_anchor or prev_anchor):
+        return None
+    return StoryTimelineDecorator(
+        prev_anchor=prev_anchor,
+        current_anchor=cur_anchor,
+        advance=cur_advance,
+    )
 
 
 async def build_decorated_chapter_pipeline(
@@ -318,6 +464,15 @@ async def build_decorated_chapter_pipeline(
     location_variety = await _build_location_variety_decorator(
         db, project.id, chapter.chapter_number
     )
+    plot_beat_cooling = await _build_plot_beat_cooling_decorator(
+        db, project.id, chapter.chapter_number
+    )
+    story_timeline = await _build_story_timeline_decorator(
+        db, project.id, chapter
+    )
+    pacing_milestone = _build_pacing_milestone_decorator(
+        volume_brief, chapter.chapter_number
+    )
 
     return PromptPipeline.for_chapter_generation(
         style_content=style_content,
@@ -331,6 +486,9 @@ async def build_decorated_chapter_pipeline(
         narrator_voice=narrator_voice,
         motif_cooling=motif_cooling,
         location_variety=location_variety,
+        plot_beat_cooling=plot_beat_cooling,
+        story_timeline=story_timeline,
+        pacing_milestone=pacing_milestone,
     )
 
 

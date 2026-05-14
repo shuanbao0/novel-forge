@@ -559,6 +559,10 @@ class PlotExpansionService:
                 "conflict_type": plan.get("conflict_type", ""),
                 "estimated_words": plan.get("estimated_words", 3000),
                 "scenes": plan.get("scenes", []) if plan.get("scenes") else None,
+                # 故事内时间锚 - 由 StoryTimelineDecorator 反馈给下章 prompt
+                # 旧 expansion_plan 无此键时取空串,Decorator 检测到空就跳过
+                "story_time_anchor": (plan.get("story_time_anchor") or "").strip(),
+                "story_time_advance": (plan.get("story_time_advance") or "").strip(),
             }, ensure_ascii=False)
             
             chapter = Chapter(

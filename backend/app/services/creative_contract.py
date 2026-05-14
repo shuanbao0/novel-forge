@@ -98,6 +98,35 @@ def _as_str_list(value: Any) -> list[str]:
     return [str(value).strip()]
 
 
+def _as_milestone_list(value: Any) -> list[dict]:
+    """归一化 pacing_milestones 输入为 [{by_chapter:int, milestone:str}, ...].
+
+    输入容错:
+      - 不是 list / dict → 返回 []
+      - 单个 dict 缺字段或字段类型错 → 静默跳过
+      - by_chapter 可能是数字字符串 → 强制 int,失败跳过
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        by_raw = item.get("by_chapter")
+        text = (item.get("milestone") or "").strip() if isinstance(item.get("milestone"), str) else ""
+        if not text:
+            continue
+        try:
+            by = int(by_raw)
+        except (TypeError, ValueError):
+            continue
+        if by <= 0:
+            continue
+        out.append({"by_chapter": by, "milestone": text})
+    out.sort(key=lambda x: x["by_chapter"])
+    return out
+
+
 @dataclass
 class VolumeBrief:
     """卷级契约 - 作用于挂在某 Outline 下的所有章节
@@ -108,6 +137,12 @@ class VolumeBrief:
     anti_patterns: list[str] = field(default_factory=list)
     required_tropes: list[str] = field(default_factory=list)
     pacing: str = ""                # 本卷期望节奏(快/平稳/紧凑)
+    pacing_milestones: list[dict] = field(default_factory=list)
+    """节奏里程碑 - [{"by_chapter": int, "milestone": str}, ...]
+    用法:
+      - 规划阶段(plot_expansion): 渲染进 prompt,让 LLM 按里程碑分配章节字数
+      - 生成阶段(PacingMilestoneDecorator): 把"逾期/即将到期"塞进 system_prompt
+    """
 
     @classmethod
     def from_raw(cls, raw: Optional[Any]) -> "VolumeBrief":
@@ -118,10 +153,14 @@ class VolumeBrief:
             anti_patterns=_as_str_list(raw.get("anti_patterns")),
             required_tropes=_as_str_list(raw.get("required_tropes")),
             pacing=str(raw.get("pacing", "") or "").strip(),
+            pacing_milestones=_as_milestone_list(raw.get("pacing_milestones")),
         )
 
     def is_empty(self) -> bool:
-        return not (self.volume_goal or self.anti_patterns or self.required_tropes or self.pacing)
+        return not (
+            self.volume_goal or self.anti_patterns or self.required_tropes
+            or self.pacing or self.pacing_milestones
+        )
 
     def to_prompt_block(self) -> str:
         if self.is_empty():
@@ -131,6 +170,10 @@ class VolumeBrief:
             sections.append(f"\n## 本卷目标\n{self.volume_goal}")
         if self.pacing:
             sections.append(f"\n## 期望节奏\n{self.pacing}")
+        if self.pacing_milestones:
+            sections.append("\n## 节奏里程碑(规划必须按此推进)")
+            for m in self.pacing_milestones:
+                sections.append(f"- 第 {m['by_chapter']} 章前: {m['milestone']}")
         if self.anti_patterns:
             sections.append("\n## 本卷反模式")
             sections.extend(f"❌ {p}" for p in self.anti_patterns)
