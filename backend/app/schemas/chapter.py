@@ -146,6 +146,17 @@ class BatchGenerateRequest(BaseModel):
     narrative_perspective: Optional[str] = Field(None, description="临时指定叙事人称，不提供则使用项目默认")
 
 
+class BatchResetChaptersRequest(BaseModel):
+    """批量重置章节请求：清空内容 + 清理衍生数据，让章节回到"未写"状态"""
+    chapter_ids: list[str] = Field(..., description="要重置的章节ID列表", min_length=1)
+
+
+class BatchResetChaptersResponse(BaseModel):
+    """批量重置章节响应"""
+    reset_count: int = Field(..., description="成功重置的章节数")
+    skipped: list[dict] = Field(default_factory=list, description="跳过的章节（含原因），格式：[{chapter_id, chapter_number, reason}]")
+
+
 class BatchGenerateResponse(BaseModel):
     """批量生成响应模型"""
     batch_id: str = Field(..., description="批次ID")

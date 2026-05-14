@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme } from 'antd';
-import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, Checkbox, theme } from 'antd';
+import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined, SafetyCertificateOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
 import { eventBus } from '../store/eventBus';
 import { useChapterSync } from '../store/hooks';
@@ -113,6 +113,11 @@ export default function Chapters() {
   const [batchForm] = Form.useForm();
   const [manualCreateForm] = Form.useForm();
   const batchPollingIntervalRef = useRef<number | null>(null);
+
+  // 重置章节(清空内容 + 清派生数据)相关状态
+  const [resetModalVisible, setResetModalVisible] = useState(false);
+  const [resetSelectedIds, setResetSelectedIds] = useState<string[]>([]);
+  const [resetSubmitting, setResetSubmitting] = useState(false);
 
   useEffect(() => {
     const handleResize = () => {
@@ -1278,7 +1283,7 @@ export default function Chapters() {
     );
 
     if (!firstIncompleteChapter) {
-      message.info('所有章节都已生成内容');
+      message.info('所有章节都已生成内容。如需重写，请先选中要重写的章节点击"重置为未写"');
       return;
     }
 
@@ -1308,6 +1313,86 @@ export default function Chapters() {
     });
 
     setBatchGenerateVisible(true);
+  };
+
+  // 打开"重置章节为未写"对话框: 把所有有内容的章节列出来供多选
+  const handleOpenResetModal = () => {
+    if (!currentProject?.id) return;
+    if (batchGenerating) {
+      message.info('正在批量生成中，请等任务结束后再重置');
+      return;
+    }
+    setResetSelectedIds([]);
+    setResetModalVisible(true);
+  };
+
+  // 提交重置: 调批量重置接口, 清空内容 + 清派生数据
+  const handleConfirmReset = async () => {
+    if (!currentProject?.id || resetSelectedIds.length === 0) return;
+
+    const targets = sortedChapters.filter(ch => resetSelectedIds.includes(ch.id));
+    const chapterNumbersText = targets.map(c => `第${c.chapter_number}章`).join('、');
+
+    const confirmed = await new Promise<boolean>((resolve) => {
+      modal.confirm({
+        title: '确认重置为未写？',
+        width: 520,
+        centered: true,
+        okText: '确认重置',
+        okType: 'danger',
+        cancelText: '取消',
+        content: (
+          <div>
+            <p>将清空以下章节的内容并清理派生数据（伏笔/记忆/分析/审稿/向量）：</p>
+            <p style={{ marginTop: 8, color: '#fa8c16' }}><strong>{chapterNumbersText}</strong></p>
+            <p style={{ marginTop: 12, fontSize: 12, color: '#999' }}>
+              保留：章节快照（ChapterCommit，可回滚） / 生成历史 / 手动伏笔。
+              <br />
+              重置完成后，可直接走"批量生成"重新写。
+            </p>
+          </div>
+        ),
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
+    });
+
+    if (!confirmed) return;
+
+    setResetSubmitting(true);
+    try {
+      const response = await fetch(`/api/chapters/project/${currentProject.id}/reset-for-rewrite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapter_ids: resetSelectedIds }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(err.detail || '重置失败');
+      }
+      const result: { reset_count: number; skipped: Array<{ chapter_number: number; reason: string }> } = await response.json();
+
+      if (result.reset_count > 0) {
+        message.success(`已重置 ${result.reset_count} 个章节为未写`);
+      }
+      if (result.skipped && result.skipped.length > 0) {
+        message.warning(`跳过 ${result.skipped.length} 个章节：${result.skipped.map(s => `第${s.chapter_number}章(${s.reason})`).join('；')}`);
+      }
+
+      setResetModalVisible(false);
+      setResetSelectedIds([]);
+
+      // 刷新章节列表 + 项目字数 + 分析任务状态
+      const refreshed = await refreshChapters();
+      await loadAnalysisTasks(refreshed);
+      const updatedProject = await projectApi.getProject(currentProject.id);
+      setCurrentProject(updatedProject);
+    } catch (err) {
+      const e = err as Error;
+      message.error('重置失败：' + (e.message || '未知错误'));
+    } finally {
+      setResetSubmitting(false);
+    }
   };
 
   // 手动创建章节(仅one-to-many模式)
@@ -1940,6 +2025,21 @@ export default function Chapters() {
           >
             {batchGenerating ? '生成中...' : '批量生成'}
           </Button>
+          {(() => {
+            const writtenCount = chapters.filter(c => (c.content || '').trim() !== '').length;
+            return (
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={handleOpenResetModal}
+                disabled={writtenCount === 0 || batchGenerating}
+                block={isMobile}
+                size={isMobile ? 'middle' : 'middle'}
+                title={writtenCount === 0 ? '暂无可重置章节' : `可重置 ${writtenCount} 章为未写状态以重新生成`}
+              >
+                重置为未写{writtenCount > 0 ? ` (${writtenCount})` : ''}
+              </Button>
+            );
+          })()}
           {(() => {
             const polishableCount = chapters.filter(c => (c.content || '').trim() !== '').length;
             return (
@@ -2935,6 +3035,112 @@ export default function Chapters() {
               </Form.Item>
             </div>
           </Form>
+      </Modal>
+
+      {/* 重置章节为"未写"对话框 - 多选已写章节, 清空内容 + 清派生数据 */}
+      <Modal
+        title={
+          <Space>
+            <ReloadOutlined style={{ color: token.colorWarning }} />
+            <span>重置章节为未写</span>
+          </Space>
+        }
+        open={resetModalVisible}
+        onCancel={() => {
+          if (!resetSubmitting) {
+            setResetModalVisible(false);
+            setResetSelectedIds([]);
+          }
+        }}
+        width={isMobile ? 'calc(100vw - 32px)' : 600}
+        centered
+        maskClosable={!resetSubmitting}
+        closable={!resetSubmitting}
+        footer={
+          <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+            <Button
+              onClick={() => {
+                setResetModalVisible(false);
+                setResetSelectedIds([]);
+              }}
+              disabled={resetSubmitting}
+            >
+              取消
+            </Button>
+            <Button
+              danger
+              type="primary"
+              icon={<ReloadOutlined />}
+              loading={resetSubmitting}
+              disabled={resetSelectedIds.length === 0}
+              onClick={handleConfirmReset}
+            >
+              重置选中{resetSelectedIds.length > 0 ? ` (${resetSelectedIds.length})` : ''}
+            </Button>
+          </Space>
+        }
+      >
+        {(() => {
+          const writtenChapters = sortedChapters.filter(
+            ch => ch.content && ch.content.trim() !== ''
+          );
+          if (writtenChapters.length === 0) {
+            return <Empty description="暂无已写章节" />;
+          }
+          const allSelected = resetSelectedIds.length === writtenChapters.length;
+          return (
+            <>
+              <Alert
+                message="重置 = 清空章节内容 + 清理派生数据（伏笔/记忆/分析/审稿/向量）。原内容可通过章节快照（ChapterCommit）回滚。"
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+              />
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 8,
+              }}>
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={!allSelected && resetSelectedIds.length > 0}
+                  onChange={(e) => {
+                    setResetSelectedIds(e.target.checked ? writtenChapters.map(c => c.id) : []);
+                  }}
+                >
+                  全选 ({writtenChapters.length})
+                </Checkbox>
+                <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
+                  已选 {resetSelectedIds.length} / {writtenChapters.length}
+                </span>
+              </div>
+              <div style={{
+                maxHeight: 400,
+                overflowY: 'auto',
+                border: `1px solid ${token.colorBorderSecondary}`,
+                borderRadius: token.borderRadius,
+                padding: 8,
+              }}>
+                <Checkbox.Group
+                  value={resetSelectedIds}
+                  onChange={(values) => setResetSelectedIds(values as string[])}
+                  style={{ width: '100%' }}
+                >
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    {writtenChapters.map(ch => (
+                      <Checkbox key={ch.id} value={ch.id} style={{ width: '100%' }}>
+                        <span style={{ fontWeight: 500 }}>第{ch.chapter_number}章</span>
+                        <span style={{ marginLeft: 8 }}>{ch.title}</span>
+                        <Tag style={{ marginLeft: 8 }}>{ch.word_count || 0}字</Tag>
+                      </Checkbox>
+                    ))}
+                  </Space>
+                </Checkbox.Group>
+              </div>
+            </>
+          );
+        })()}
       </Modal>
 
       {/* 单章节生成进度显示 */}

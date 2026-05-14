@@ -1,7 +1,7 @@
 """章节管理API"""
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
 import json
 import asyncio
@@ -25,6 +25,7 @@ from app.models.generation_history import GenerationHistory
 from app.models.writing_style import WritingStyle
 from app.models.analysis_task import AnalysisTask
 from app.models.memory import PlotAnalysis, StoryMemory
+from app.models.chapter_review import ChapterReview
 from app.models.batch_generation_task import BatchGenerationTask
 from app.models.regeneration_task import RegenerationTask
 from app.models.background_task import BackgroundTask
@@ -42,6 +43,8 @@ from app.schemas.chapter import (
     BatchGenerateRequest,
     BatchGenerateResponse,
     BatchGenerateStatusResponse,
+    BatchResetChaptersRequest,
+    BatchResetChaptersResponse,
     ExpansionPlanUpdate,
     PartialRegenerateRequest
 )
@@ -280,12 +283,12 @@ async def update_chapter(
     
     # 记录旧字数
     old_word_count = chapter.word_count or 0
-    
+
     # 更新字段
     update_data = chapter_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(chapter, field, value)
-    
+
     # 如果内容更新了，重新计算字数（包括清空内容的情况）
     if "content" in update_data:
         new_word_count = len(chapter.content) if chapter.content else 0
@@ -299,58 +302,18 @@ async def update_chapter(
         if project:
             project.current_words = project.current_words - old_word_count + new_word_count
 
-        # 如果内容被清空，回退状态并清理上下游派生数据
+        # 如果内容被清空，回退状态并清理派生数据(伏笔/记忆/分析/审稿/向量)
         # 否则下次 AI 创作会读到旧的记忆/伏笔造成污染,大纲也会按"已完成"计数
+        # 注: 仅在清空时清理, 用户手工编辑/润色不会触发
         if not chapter.content or chapter.content.strip() == "":
             chapter.status = "draft"
-
-            # 清理分析任务
-            analysis_tasks_result = await db.execute(
-                select(AnalysisTask).where(AnalysisTask.chapter_id == chapter_id)
+            await cleanup_chapter_derived_data(
+                db=db,
+                user_id=user_id,
+                chapter=chapter,
             )
-            for task in analysis_tasks_result.scalars().all():
-                await db.delete(task)
+            logger.info(f"🗑️ 章节 {chapter_id[:8]} 内容已清空，已清理派生数据")
 
-            # 清理分析结果
-            plot_analysis_result = await db.execute(
-                select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
-            )
-            for analysis in plot_analysis_result.scalars().all():
-                await db.delete(analysis)
-
-            # 清理故事记忆（关系数据库）
-            story_memories_result = await db.execute(
-                select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
-            )
-            for memory in story_memories_result.scalars().all():
-                await db.delete(memory)
-
-            # 清理向量数据库中的记忆数据
-            try:
-                await memory_service.delete_chapter_memories(
-                    user_id=user_id,
-                    project_id=chapter.project_id,
-                    chapter_id=chapter_id
-                )
-                logger.info(f"✅ 已清理章节 {chapter_id[:8]} 的向量记忆数据")
-            except Exception as e:
-                logger.warning(f"⚠️ 清理向量记忆数据失败: {str(e)}")
-
-            # 🔮 清理章节相关的分析伏笔数据
-            try:
-                foreshadow_result = await foreshadow_service.delete_chapter_foreshadows(
-                    db=db,
-                    project_id=chapter.project_id,
-                    chapter_id=chapter_id,
-                    only_analysis_source=True  # 只删除分析来源的伏笔，保留手动创建的
-                )
-                if foreshadow_result['deleted_count'] > 0:
-                    logger.info(f"🔮 已清理章节 {chapter_id[:8]} 的 {foreshadow_result['deleted_count']} 个伏笔数据")
-            except Exception as e:
-                logger.warning(f"⚠️ 清理伏笔数据失败: {str(e)}")
-
-            logger.info(f"🗑️ 章节 {chapter_id[:8]} 内容已清空，已清理分析、记忆和伏笔数据")
-    
     await db.commit()
     await db.refresh(chapter)
     
@@ -443,8 +406,129 @@ async def delete_chapter(
     # 删除章节（关系数据库中的记忆会被级联删除）
     await db.delete(chapter)
     await db.commit()
-    
+
     return {"message": "章节删除成功"}
+
+
+async def _reset_chapter_for_rewrite(
+    db: AsyncSession,
+    user_id: str,
+    chapter: Chapter,
+) -> None:
+    """把章节回到"未写"状态:清空 content + status=draft + 扣项目字数 + 清理派生数据。
+
+    复用 cleanup_chapter_derived_data 保证派生数据(伏笔/记忆/分析/审稿/向量)
+    的清理路径与 update_chapter 清空时完全一致。
+
+    注: cleanup_chapter_derived_data 内部会自行 commit, 调用方只需在末尾
+    再 commit 一次本函数对 chapter.content / project.current_words 的修改。
+    """
+    old_word_count = chapter.word_count or 0
+
+    # 先清理派生数据(内部自管 commit), 再清空章节本体
+    await cleanup_chapter_derived_data(db=db, user_id=user_id, chapter=chapter)
+
+    chapter.content = ""
+    chapter.word_count = 0
+    chapter.status = "draft"
+
+    # 扣减项目字数
+    project_result = await db.execute(
+        select(Project).where(Project.id == chapter.project_id)
+    )
+    project = project_result.scalar_one_or_none()
+    if project:
+        project.current_words = max(0, (project.current_words or 0) - old_word_count)
+
+
+@router.post("/{chapter_id}/reset-for-rewrite", summary="重置章节为未写")
+async def reset_chapter_for_rewrite(
+    chapter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """清空指定章节的内容并清理所有派生数据(伏笔/记忆/分析/审稿/向量), 让章节回到"未写"状态。
+
+    重置后, 该章节可直接作为"批量生成"的起点, 走纯粹的新写路径。
+    """
+    user_id = getattr(request.state, 'user_id', None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
+    chapter = result.scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+
+    await verify_project_access(chapter.project_id, user_id, db)
+
+    if not chapter.content or chapter.content.strip() == "":
+        return {"message": "章节本身已经是未写状态，无需重置", "chapter_id": chapter_id}
+
+    await _reset_chapter_for_rewrite(db, user_id, chapter)
+    await db.commit()
+
+    logger.info(f"♻️ 章节已重置为未写: chapter={chapter_id[:8]} chapter_number={chapter.chapter_number}")
+    return {"message": "章节已重置为未写", "chapter_id": chapter_id}
+
+
+@router.post(
+    "/project/{project_id}/reset-for-rewrite",
+    response_model=BatchResetChaptersResponse,
+    summary="批量重置章节为未写",
+)
+async def batch_reset_chapters_for_rewrite(
+    project_id: str,
+    reset_request: BatchResetChaptersRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """批量重置选中章节为"未写"状态。已为空的章节会被跳过。
+
+    重置完成后, 用户直接点"批量生成"即可走新写路径。
+    """
+    user_id = getattr(request.state, 'user_id', None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    await verify_project_access(project_id, user_id, db)
+
+    result = await db.execute(
+        select(Chapter)
+        .where(Chapter.project_id == project_id)
+        .where(Chapter.id.in_(reset_request.chapter_ids))
+        .order_by(Chapter.chapter_number)
+    )
+    target_chapters = result.scalars().all()
+    if not target_chapters:
+        raise HTTPException(status_code=404, detail="未找到要重置的章节")
+
+    skipped: list[dict] = []
+    reset_count = 0
+    for ch in target_chapters:
+        if not ch.content or ch.content.strip() == "":
+            skipped.append({
+                "chapter_id": ch.id,
+                "chapter_number": ch.chapter_number,
+                "reason": "章节本身已是未写状态",
+            })
+            continue
+        try:
+            await _reset_chapter_for_rewrite(db, user_id, ch)
+            reset_count += 1
+            logger.info(f"♻️ 批量重置: 第{ch.chapter_number}章 已重置为未写")
+        except Exception as e:
+            logger.error(f"❌ 批量重置失败 [chapter={ch.id[:8]}]: {e}", exc_info=True)
+            skipped.append({
+                "chapter_id": ch.id,
+                "chapter_number": ch.chapter_number,
+                "reason": str(e)[:200],
+            })
+
+    await db.commit()
+
+    logger.info(f"♻️ 批量重置完成: project={project_id[:8]} reset={reset_count} skipped={len(skipped)}")
+    return BatchResetChaptersResponse(reset_count=reset_count, skipped=skipped)
 
 
 async def check_prerequisites(db: AsyncSession, chapter: Chapter) -> tuple[bool, str, list[Chapter]]:
@@ -481,8 +565,89 @@ async def check_prerequisites(db: AsyncSession, chapter: Chapter) -> tuple[bool,
         missing_numbers = [str(ch.chapter_number) for ch in incomplete_chapters]
         error_msg = f"需要先完成前置章节：第 {', '.join(missing_numbers)} 章"
         return False, error_msg, previous_chapters
-    
+
     return True, "", previous_chapters
+
+
+async def cleanup_chapter_derived_data(
+    db: AsyncSession,
+    user_id: str,
+    chapter: Chapter,
+) -> None:
+    """清理一章产生的所有衍生数据 (不删章节本身)。
+
+    使用场景:
+      - update_chapter 把 content 清空时调用 (老用法)
+      - 用户主动"重置章节为未写"时调用 (reset-for-rewrite 接口)
+
+    清理范围:
+      - 向量记忆 (chroma collection)
+      - 分析来源的伏笔 (foreshadow_service.delete_chapter_foreshadows, 需在删 PlotAnalysis 之前)
+      - story_memories / chapter_reviews / analysis_tasks / plot_analysis
+
+    保留 (审计 / 用户手工资产):
+      - GenerationHistory  (append-only 历史)
+      - ChapterCommit      (版本快照, 留作回滚)
+      - 手动创建的伏笔     (foreshadow only_analysis_source=True 已排除)
+
+    ⚠️ 已知局限 (无法干净回滚的衍生数据):
+      - CharacterCareer / CharacterRelationship 是"当前状态快照"表(每对实体一行),
+        没有 chapter_id 关联, 也没有事件流历史。重置后再生成新内容时,
+        career_update_service 会再次 update_or_create, 但旧值可能被后续章节
+        叠加过, 单章重置会留下数值偏差。
+      - 缓解办法: 重置一段连续章节, 让职业/关系跟着新内容重新累积。
+      - 根治需引入 chapter_character_state_snapshots 事件流表, 是独立改造。
+
+    所有清理步骤独立 try/except, 单步失败只 warning, 不中断流程。
+    """
+    chapter_id = chapter.id
+    project_id = chapter.project_id
+
+    # 1. 向量库
+    try:
+        await memory_service.delete_chapter_memories(
+            user_id=user_id,
+            project_id=project_id,
+            chapter_id=chapter_id,
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ 重写前清理向量记忆失败 [chapter={chapter_id[:8]}]: {e}")
+
+    # 2. 伏笔(必须在 PlotAnalysis 删除前调用, 内部依赖 PlotAnalysis 查 source_analysis_id)
+    try:
+        fs_result = await foreshadow_service.delete_chapter_foreshadows(
+            db=db,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            only_analysis_source=True,
+        )
+        if fs_result.get('deleted_count', 0) > 0:
+            logger.info(f"🔮 重写前清理伏笔 {fs_result['deleted_count']} 条 [chapter={chapter_id[:8]}]")
+    except Exception as e:
+        logger.warning(f"⚠️ 重写前清理伏笔失败 [chapter={chapter_id[:8]}]: {e}")
+
+    # 3. 关系库衍生表
+    deletions = [
+        (StoryMemory, "story_memories"),
+        (ChapterReview, "chapter_reviews"),
+        (AnalysisTask, "analysis_tasks"),
+        (PlotAnalysis, "plot_analysis"),  # 最后删, 让伏笔服务先用上它
+    ]
+    for Model, label in deletions:
+        try:
+            stmt = delete(Model).where(Model.chapter_id == chapter_id)
+            result = await db.execute(stmt)
+            count = result.rowcount or 0
+            if count > 0:
+                logger.info(f"🗑️ 重写前清理 {label} {count} 条 [chapter={chapter_id[:8]}]")
+        except Exception as e:
+            logger.warning(f"⚠️ 重写前清理 {label} 失败 [chapter={chapter_id[:8]}]: {e}")
+
+    try:
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"⚠️ 重写前清理 commit 失败 [chapter={chapter_id[:8]}]: {e}")
+        await db.rollback()
 
 
 async def build_characters_info_with_careers(
@@ -2800,7 +2965,7 @@ async def batch_generate_chapters_in_order(
     can_generate, error_msg, _ = await check_prerequisites(db, first_chapter)
     if not can_generate:
         raise HTTPException(status_code=400, detail=f"起始章节无法生成：{error_msg}")
-    
+
     # 创建批量生成任务
     batch_task = BatchGenerationTask(
         project_id=project_id,
@@ -3067,7 +3232,7 @@ async def execute_batch_generation_in_order(
                     can_generate, error_msg, _ = await check_prerequisites(db_session, chapter)
                     if not can_generate:
                         raise Exception(f"前置条件不满足: {error_msg}")
-                    
+
                     # 生成 + 后处理(伏笔/快照/同步分析/审稿)在 generate_single_chapter_for_batch
                     # 内部一站式完成。分析失败会抛出 RuntimeError,被下方 except 捕获后中断整批。
                     generated_summary = await generate_single_chapter_for_batch(
