@@ -386,40 +386,60 @@ async def export_project_chapters(
             logger.warning(f"项目没有章节: {project_id}")
             raise HTTPException(status_code=404, detail="项目没有任何章节")
         
+        # 过滤掉未生成完成或正文为空的章节,避免把占位符 "（本章暂无内容）"
+        # 和 AI 解析失败兜底章节(标题如 "AI解析失败的默认章节")写进导出文件。
+        exportable = [
+            c for c in chapters
+            if (c.content or "").strip() and c.status == "completed"
+        ]
+        skipped = len(chapters) - len(exportable)
+        if skipped:
+            skipped_numbers = [c.chapter_number for c in chapters if c not in exportable]
+            logger.warning(
+                f"导出跳过 {skipped} 章未完成/空内容章节: project_id={project_id}, "
+                f"chapter_numbers={skipped_numbers}"
+            )
+
+        if not exportable:
+            raise HTTPException(
+                status_code=400,
+                detail="项目下没有已生成完成的章节,无法导出"
+            )
+
         txt_content = []
-        
-        for idx, chapter in enumerate(chapters):
+
+        for idx, chapter in enumerate(exportable):
             chapter_title = (chapter.title or "").strip() or f"未命名章节{chapter.chapter_number}"
             raw_content = (chapter.content or "").strip()
-            if raw_content:
-                formatted_lines = []
-                for line in raw_content.splitlines():
-                    stripped_line = line.strip()
-                    if stripped_line:
-                        formatted_lines.append(f"　　{stripped_line}")
-                    else:
-                        formatted_lines.append("")
-                chapter_content = "\n".join(formatted_lines)
-            else:
-                chapter_content = "　　（本章暂无内容）"
-            
+            formatted_lines = []
+            for line in raw_content.splitlines():
+                stripped_line = line.strip()
+                if stripped_line:
+                    formatted_lines.append(f"　　{stripped_line}")
+                else:
+                    formatted_lines.append("")
+            chapter_content = "\n".join(formatted_lines)
+
             # 使用拆书强匹配可稳定识别的章节标题格式：第X章 标题
             txt_content.append(f"第{chapter.chapter_number}章 {chapter_title}")
             txt_content.append(chapter_content)
-            
+
             # 章节之间只保留一个空行，避免装饰性分割线干扰拆书识别
-            if idx < len(chapters) - 1:
+            if idx < len(exportable) - 1:
                 txt_content.append("")
-        
+
         final_content = "\n".join(txt_content)
-        
+
         safe_title = "".join(c for c in (project.title or "未命名项目") if c.isalnum() or c in (' ', '-', '_', '，', '。', '、'))
         filename = f"{safe_title}.txt"
-        
+
         from urllib.parse import quote
         encoded_filename = quote(filename)
-        
-        logger.info(f"导出成功: {filename}, 共{len(chapters)}章, {len(final_content)}字符")
+
+        logger.info(
+            f"导出成功: {filename}, 共{len(exportable)}章(跳过{skipped}章), "
+            f"{len(final_content)}字符"
+        )
         
         return Response(
             content=final_content.encode('utf-8'),

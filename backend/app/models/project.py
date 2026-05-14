@@ -41,6 +41,14 @@ class Project(Base):
     # 从已写章节自动抽取的作者风格特征,用于后续章节风格自一致
     style_patterns = Column(JSON, comment="作者写作模式特征(由 /learn-style 接口生成)")
 
+    # 生成偏好 - 用户级别的生成质量配置,影响 prompt 装饰与规划阶段
+    # 结构: {
+    #   "protagonist_voice": {"age": int, "era": str, "forbidden_vocab": [str]},
+    #   "subplots": [str]
+    # }
+    # 由 NarratorVoiceDecorator / SubplotProgressionDecorator 等读取
+    generation_settings = Column(JSON, comment="生成偏好(声音约束 / 支线列表)")
+
     # 封面字段
     cover_image_url = Column(String(1000), comment="封面图片访问地址")
     cover_prompt = Column(Text, comment="最近一次生成封面使用的提示词")

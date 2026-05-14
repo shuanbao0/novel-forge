@@ -1,7 +1,12 @@
 import { Modal, Form, Input, InputNumber, Select, Tag, Space, Button, message, Divider } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useState, useEffect, useCallback } from 'react';
-import type { ExpansionPlanData, Character } from '../types';
+import type {
+  ExpansionPlanData,
+  Character,
+  CharacterBeat,
+  SubplotProgression,
+} from '../types';
 import { characterApi } from '../services/api';
 
 const { TextArea } = Input;
@@ -34,6 +39,10 @@ export default function ExpansionPlanEditor({
   const [availableCharacters, setAvailableCharacters] = useState<Character[]>([]);
   const [characters, setCharacters] = useState<string[]>([]);
   const [loadingCharacters, setLoadingCharacters] = useState(false);
+
+  // 本章角色节拍 + 支线推进 - 喂给后端 CharacterArcDecorator / 支线指令
+  const [characterBeats, setCharacterBeats] = useState<CharacterBeat[]>([]);
+  const [subplotProgression, setSubplotProgression] = useState<SubplotProgression[]>([]);
 
   // 加载项目角色列表
   const loadCharacters = useCallback(async () => {
@@ -81,6 +90,8 @@ export default function ExpansionPlanEditor({
       if (planData) {
         setKeyEvents(planData.key_events || []);
         setCharacters(planData.character_focus || []);
+        setCharacterBeats(planData.character_beats || []);
+        setSubplotProgression(planData.subplot_progression || []);
         form.setFieldsValue({
           summary: chapterSummary || '',
           emotional_tone: planData.emotional_tone,
@@ -92,6 +103,8 @@ export default function ExpansionPlanEditor({
         // 重置状态
         setKeyEvents([]);
         setCharacters([]);
+        setCharacterBeats([]);
+        setSubplotProgression([]);
         form.setFieldsValue({
           summary: chapterSummary || ''
         });
@@ -131,10 +144,20 @@ export default function ExpansionPlanEditor({
         return;
       }
       
+      // 角色节拍 / 支线推进: 过滤掉名称或内容为空的行,避免脏数据
+      const cleanedBeats = characterBeats
+        .map((b) => ({ name: (b.name || '').trim(), beat: (b.beat || '').trim() }))
+        .filter((b) => b.name && b.beat);
+      const cleanedSubplots = subplotProgression
+        .map((s) => ({ subplot: (s.subplot || '').trim(), step: (s.step || '').trim() }))
+        .filter((s) => s.subplot && s.step);
+
       const updatedPlan: ExpansionPlanData & { summary?: string } = {
         summary: values.summary,
         key_events: keyEvents,
         character_focus: characters,
+        character_beats: cleanedBeats,
+        subplot_progression: cleanedSubplots,
         emotional_tone: values.emotional_tone,
         narrative_goal: values.narrative_goal,
         conflict_type: values.conflict_type,
@@ -156,6 +179,8 @@ export default function ExpansionPlanEditor({
     form.resetFields();
     setKeyEvents([]);
     setCharacters([]);
+    setCharacterBeats([]);
+    setSubplotProgression([]);
     setKeyEventInput('');
     onCancel();
   };
@@ -288,6 +313,104 @@ export default function ExpansionPlanEditor({
                 </Tag>
               ))}
             </Space>
+          </Space>
+        </Form.Item>
+
+        {/* 本章角色节拍 - 喂给后端 CharacterArcDecorator */}
+        <Form.Item
+          label="本章角色节拍"
+          tooltip="每个角色在本章的具体动作/心境变化(必须比上一章前进一步)。空着也行,但建议至少填出主要角色。"
+        >
+          <Space direction="vertical" style={{ width: '100%' }}>
+            {characterBeats.map((beat, idx) => (
+              <Space.Compact key={idx} style={{ width: '100%' }}>
+                <Input
+                  placeholder="角色名"
+                  value={beat.name}
+                  style={{ width: '30%' }}
+                  onChange={(e) => {
+                    const next = [...characterBeats];
+                    next[idx] = { ...next[idx], name: e.target.value };
+                    setCharacterBeats(next);
+                  }}
+                />
+                <Input
+                  placeholder="本章该角色的具体行动或心境转变"
+                  value={beat.beat}
+                  onChange={(e) => {
+                    const next = [...characterBeats];
+                    next[idx] = { ...next[idx], beat: e.target.value };
+                    setCharacterBeats(next);
+                  }}
+                />
+                <Button
+                  icon={<DeleteOutlined />}
+                  danger
+                  onClick={() =>
+                    setCharacterBeats(characterBeats.filter((_, i) => i !== idx))
+                  }
+                />
+              </Space.Compact>
+            ))}
+            <Button
+              type="dashed"
+              icon={<PlusOutlined />}
+              onClick={() =>
+                setCharacterBeats([...characterBeats, { name: '', beat: '' }])
+              }
+              block
+            >
+              添加角色节拍
+            </Button>
+          </Space>
+        </Form.Item>
+
+        {/* 本章支线推进 - 喂给规划层指令与生成阶段 */}
+        <Form.Item
+          label="本章支线推进"
+          tooltip="本章实际推进的项目级支线。在'项目-生成偏好'里先声明全局支线,然后这里填本章具体推进了哪条。"
+        >
+          <Space direction="vertical" style={{ width: '100%' }}>
+            {subplotProgression.map((row, idx) => (
+              <Space.Compact key={idx} style={{ width: '100%' }}>
+                <Input
+                  placeholder="支线名(如:苏晚晴线)"
+                  value={row.subplot}
+                  style={{ width: '30%' }}
+                  onChange={(e) => {
+                    const next = [...subplotProgression];
+                    next[idx] = { ...next[idx], subplot: e.target.value };
+                    setSubplotProgression(next);
+                  }}
+                />
+                <Input
+                  placeholder="本章对该支线的具体推进"
+                  value={row.step}
+                  onChange={(e) => {
+                    const next = [...subplotProgression];
+                    next[idx] = { ...next[idx], step: e.target.value };
+                    setSubplotProgression(next);
+                  }}
+                />
+                <Button
+                  icon={<DeleteOutlined />}
+                  danger
+                  onClick={() =>
+                    setSubplotProgression(subplotProgression.filter((_, i) => i !== idx))
+                  }
+                />
+              </Space.Compact>
+            ))}
+            <Button
+              type="dashed"
+              icon={<PlusOutlined />}
+              onClick={() =>
+                setSubplotProgression([...subplotProgression, { subplot: '', step: '' }])
+              }
+              block
+            >
+              添加支线推进
+            </Button>
           </Space>
         </Form.Item>
 

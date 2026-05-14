@@ -19,7 +19,14 @@ from app.services.creative_contract import (
     CreativeContract,
     VolumeBrief,
 )
-from app.services.prompt_decorators import PromptContext, PromptPipeline
+from app.services.prompt_decorators import (
+    CharacterArcDecorator,
+    LocationVarietyDecorator,
+    MotifCoolingDecorator,
+    NarratorVoiceDecorator,
+    PromptContext,
+    PromptPipeline,
+)
 from app.services.prompt_service import PromptService
 
 if TYPE_CHECKING:
@@ -100,6 +107,165 @@ async def build_base_chapter_prompt(
     return PromptService.format_prompt(template, **fmt_kwargs)
 
 
+def _build_narrator_voice_decorator(project: "Project") -> Optional[NarratorVoiceDecorator]:
+    """从 project.generation_settings.protagonist_voice 构造装饰器。
+
+    配置缺失时返回 None,装饰器工厂会自动跳过它。
+    """
+    settings = getattr(project, "generation_settings", None) or {}
+    if not isinstance(settings, dict):
+        return None
+    voice = settings.get("protagonist_voice")
+    if not isinstance(voice, dict):
+        return None
+    age = voice.get("age")
+    era = voice.get("era")
+    forbidden = voice.get("forbidden_vocab") or []
+    if not isinstance(forbidden, list):
+        forbidden = []
+    if not (age or era or forbidden):
+        return None
+    return NarratorVoiceDecorator(age=age, era=era, forbidden_vocab=forbidden)
+
+
+async def _fetch_recent_plot_analyses(
+    db: AsyncSession,
+    project_id: str,
+    current_chapter: int,
+    lookback: int,
+):
+    """加载最近 N 章已完成的 PlotAnalysis 记录(按 chapter_number 升序)。
+
+    PlotAnalysis 没有 chapter_number 列,需要 JOIN Chapter 表。
+    第 1 章或仓库无数据时返回空列表。
+    """
+    if current_chapter <= 1 or lookback <= 0:
+        return []
+    from sqlalchemy import select
+    from app.models.chapter import Chapter
+    from app.models.memory import PlotAnalysis
+
+    lower = max(1, current_chapter - lookback)
+    q = await db.execute(
+        select(PlotAnalysis, Chapter.chapter_number)
+        .join(Chapter, Chapter.id == PlotAnalysis.chapter_id)
+        .where(Chapter.project_id == project_id)
+        .where(Chapter.chapter_number >= lower)
+        .where(Chapter.chapter_number < current_chapter)
+        .order_by(Chapter.chapter_number.asc())
+    )
+    return [pa for (pa, _) in q.all()]
+
+
+async def _build_character_arc_decorator(
+    db: AsyncSession,
+    project_id: str,
+    chapter_number: int,
+) -> Optional[CharacterArcDecorator]:
+    """聚合最近 5 章每个角色的最新状态 + 关系变化,构造装饰器。
+
+    多章中同一角色多次出现时,后出现的覆盖前面(取最新)。
+    无数据时返回 None,管线无感跳过。
+    """
+    try:
+        analyses = await _fetch_recent_plot_analyses(db, project_id, chapter_number, lookback=5)
+    except Exception as exc:
+        logger.warning(f"⚠️ 角色弧线读取失败(跳过): {exc}")
+        return None
+    if not analyses:
+        return None
+    # name -> 最新状态字典
+    latest: dict[str, dict] = {}
+    for pa in analyses:
+        states = pa.character_states or []
+        if not isinstance(states, list):
+            continue
+        for s in states:
+            if not isinstance(s, dict):
+                continue
+            name = (s.get("character_name") or "").strip()
+            if not name:
+                continue
+            state_after = (s.get("state_after") or "").strip()
+            psych = (s.get("psychological_change") or "").strip()
+            rel_changes = s.get("relationship_changes") or {}
+            rel_text = ""
+            if isinstance(rel_changes, dict) and rel_changes:
+                pairs = [f"与{k}: {v}" for k, v in list(rel_changes.items())[:3] if v]
+                rel_text = "; ".join(pairs)
+            combined_state = state_after or psych
+            if not combined_state and not rel_text:
+                continue
+            latest[name] = {
+                "name": name,
+                "state": combined_state,
+                "relationships": rel_text,
+            }
+    if not latest:
+        return None
+    return CharacterArcDecorator(arcs=list(latest.values()))
+
+
+async def _build_location_variety_decorator(
+    db: AsyncSession,
+    project_id: str,
+    chapter_number: int,
+) -> Optional[LocationVarietyDecorator]:
+    """从最近 3 章 PlotAnalysis.scenes 取地点,构造装饰器。
+
+    取近期 3 章已经发生的场景, 用作"避免再次出现"的提示。
+    无数据时返回 None。
+    """
+    try:
+        analyses = await _fetch_recent_plot_analyses(db, project_id, chapter_number, lookback=3)
+    except Exception as exc:
+        logger.warning(f"⚠️ 场景列表读取失败(跳过): {exc}")
+        return None
+    if not analyses:
+        return None
+    locations: list[str] = []
+    for pa in analyses:
+        scenes = pa.scenes or []
+        if not isinstance(scenes, list):
+            continue
+        for scene in scenes:
+            if isinstance(scene, dict):
+                loc = scene.get("location")
+                if isinstance(loc, str) and loc.strip():
+                    locations.append(loc.strip())
+    if not locations:
+        return None
+    return LocationVarietyDecorator(recent_locations=locations)
+
+
+async def _build_motif_cooling_decorator(
+    db: AsyncSession,
+    project_id: str,
+    chapter_number: int,
+) -> Optional[MotifCoolingDecorator]:
+    """从 MotifRepository 读取近期已用意象,构造冷却装饰器。
+
+    第一章 / 仓库为空 / 查询失败 时返回 None,管线无感跳过。
+    """
+    if chapter_number <= 1:
+        return None
+    try:
+        from app.repositories.motif_repo import MotifRepository
+    except ImportError:
+        # 在 Phase 3 落地前先不强求依赖存在
+        return None
+    try:
+        repo = MotifRepository(db)
+        cooling = await repo.get_cooling(project_id, chapter_number, lookback=3)
+        banned = await repo.get_overused(project_id, threshold=5)
+    except Exception as exc:
+        logger.warning(f"⚠️ 意象去重数据读取失败（跳过）: {exc}")
+        return None
+    if not cooling and not banned:
+        return None
+    return MotifCoolingDecorator(cooling=cooling, banned=banned)
+
+
 async def build_decorated_chapter_pipeline(
     *,
     db: AsyncSession,
@@ -109,10 +275,9 @@ async def build_decorated_chapter_pipeline(
     style_content: Optional[str],
     anti_ai_enabled: bool = True,
 ) -> PromptPipeline:
-    """装配章节生成的 PromptPipeline（含契约 / 便签 / 风格模式 / 反 AI / 输出格式）。
+    """装配章节生成的 PromptPipeline（含契约 / 便签 / 风格模式 / 声音 / 意象 / 反 AI / 输出格式）。
 
-    所有上下文准备（contract / volume_brief / chapter_brief / scratchpad / pattern）
-    均在此完成，调用方只需提交 base_prompt 即可。
+    所有上下文准备均在此完成，调用方只需提交 base_prompt 即可。
     """
     project_contract = CreativeContract.from_raw(
         getattr(project, "creative_contract", None)
@@ -137,6 +302,17 @@ async def build_decorated_chapter_pipeline(
         getattr(project, "style_patterns", None)
     ).to_prompt_block()
 
+    narrator_voice = _build_narrator_voice_decorator(project)
+    motif_cooling = await _build_motif_cooling_decorator(
+        db, project.id, chapter.chapter_number
+    )
+    character_arc = await _build_character_arc_decorator(
+        db, project.id, chapter.chapter_number
+    )
+    location_variety = await _build_location_variety_decorator(
+        db, project.id, chapter.chapter_number
+    )
+
     return PromptPipeline.for_chapter_generation(
         style_content=style_content,
         anti_ai_enabled=anti_ai_enabled,
@@ -145,6 +321,10 @@ async def build_decorated_chapter_pipeline(
         chapter_brief=chapter_brief,
         scratchpad_text=scratchpad_text,
         style_pattern_text=style_pattern_text,
+        character_arc=character_arc,
+        narrator_voice=narrator_voice,
+        motif_cooling=motif_cooling,
+        location_variety=location_variety,
     )
 
 

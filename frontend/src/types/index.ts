@@ -153,6 +153,17 @@ export interface AuthUrlResponse {
 }
 
 // 项目类型定义
+export interface ProtagonistVoice {
+  age?: number;
+  era?: string;
+  forbidden_vocab?: string[];
+}
+
+export interface GenerationSettings {
+  protagonist_voice?: ProtagonistVoice;
+  subplots?: string[];
+}
+
 export interface Project {
   id: string;  // UUID字符串
   title: string;
@@ -172,6 +183,7 @@ export interface Project {
   chapter_count?: number;
   narrative_perspective?: string;
   character_count?: number;
+  generation_settings?: GenerationSettings;
   cover_image_url?: string;
   cover_prompt?: string;
   cover_status?: 'none' | 'generating' | 'ready' | 'failed';
@@ -210,6 +222,7 @@ export interface ProjectUpdate {
   chapter_count?: number;
   narrative_perspective?: string;
   character_count?: number;
+  generation_settings?: GenerationSettings;
   // current_words 由章节内容自动计算，不在此接口中
 }
 
@@ -334,10 +347,22 @@ export interface CharacterUpdate {
   color?: string;
 }
 
+export interface CharacterBeat {
+  name: string;
+  beat: string;
+}
+
+export interface SubplotProgression {
+  subplot: string;
+  step: string;
+}
+
 // 展开规划数据结构
 export interface ExpansionPlanData {
   key_events: string[];
   character_focus: string[];
+  character_beats?: CharacterBeat[];
+  subplot_progression?: SubplotProgression[];
   emotional_tone: string;
   narrative_goal: string;
   conflict_type: string;

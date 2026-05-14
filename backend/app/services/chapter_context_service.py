@@ -20,6 +20,40 @@ from app.logger import get_logger
 logger = get_logger(__name__)
 
 
+# 中文句末标点，用于切割衔接锚点时找句子边界
+_SENTENCE_END_PUNCT = ('。', '！', '？', '…', '」', '"', '"')
+
+
+def _tail_on_boundary(content: str, max_length: int) -> str:
+    """从 content 末尾截取不超过 max_length 字符,但起点对齐到段落/句末,避免半句开头。
+
+    回退顺序: 段落边界(\\n\\n) > 单换行 > 中文句末标点 > 硬切。
+    对每一类边界,在最近 max_length 字符内挑最靠前的边界,以最大化保留上下文。
+    """
+    if len(content) <= max_length:
+        return content
+
+    hard_tail = content[-max_length:]
+
+    # 1. 段落边界：在 hard_tail 中找最早的 \n\n 之后位置
+    for marker in ('\n\n', '\n'):
+        idx = hard_tail.find(marker)
+        if 0 <= idx < max_length - max_length // 3:
+            return hard_tail[idx + len(marker):]
+
+    # 2. 中文句末标点：在 hard_tail 中找最早的句末位置之后
+    best_cut = -1
+    for punct in _SENTENCE_END_PUNCT:
+        pos = hard_tail.find(punct)
+        if pos >= 0 and (best_cut == -1 or pos < best_cut):
+            best_cut = pos
+    if 0 <= best_cut < max_length - max_length // 3:
+        return hard_tail[best_cut + 1:].lstrip()
+
+    # 3. 兜底硬切
+    return hard_tail
+
+
 @dataclass
 class OneToManyContext:
     """
@@ -300,6 +334,10 @@ class OneToManyContextBuilder:
 情感基调：{plan.get('emotional_tone', '未设定')}
 叙事目标：{plan.get('narrative_goal', '未设定')}
 冲突类型：{plan.get('conflict_type', '未设定')}"""
+                # 支线推进 - 让 AI 在本章里真正动一动悬置的支线
+                subplot_block = self._render_subplot_progression_block(plan)
+                if subplot_block:
+                    outline_content = f"{outline_content}\n\n{subplot_block}"
                 # 三层节点(CBN/CPN/CEN)若存在则附加在末尾,优先级高于宏观大纲
                 node_block = self._render_outline_node_block(outline)
                 if node_block:
@@ -319,6 +357,23 @@ class OneToManyContextBuilder:
             return ""
         nodes = parse_outline_nodes(outline.structure)
         return render_nodes_for_prompt(nodes)
+
+    def _render_subplot_progression_block(self, plan: dict) -> str:
+        """渲染本章应推进的支线列表。规划阶段(plot_expansion)写入,生成阶段读出。"""
+        items = plan.get('subplot_progression') or []
+        if not isinstance(items, list):
+            return ""
+        lines: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            subplot = (item.get('subplot') or '').strip()
+            step = (item.get('step') or '').strip()
+            if subplot and step:
+                lines.append(f"- 【{subplot}】{step}")
+        if not lines:
+            return ""
+        return "支线推进(本章必须落到正文)：\n" + "\n".join(lines)
     
     async def _build_chapter_characters_1n(
         self,
@@ -342,12 +397,21 @@ class OneToManyContextBuilder:
         # 构建全局角色名称映射（用于关系查询）
         all_char_map = {c.id: c.name for c in all_characters}
         
-        # 从expansion_plan中提取角色焦点
+        # 从expansion_plan中提取角色焦点 + 本章节拍
         filter_character_names = None
+        character_beats_map: Dict[str, str] = {}
         if chapter.expansion_plan:
             try:
                 plan = json.loads(chapter.expansion_plan)
                 filter_character_names = plan.get('character_focus', [])
+                beats_raw = plan.get('character_beats') or []
+                if isinstance(beats_raw, list):
+                    for item in beats_raw:
+                        if isinstance(item, dict):
+                            name = (item.get('name') or '').strip()
+                            beat = (item.get('beat') or '').strip()
+                            if name and beat:
+                                character_beats_map[name] = beat
             except json.JSONDecodeError:
                 pass
         
@@ -485,7 +549,13 @@ class OneToManyContextBuilder:
             if c.background:
                 background_preview = c.background[:150] if len(c.background) > 150 else c.background
                 info_lines.append(f"  背景: {background_preview}")
-            
+
+            # 本章节拍 - 来自规划阶段的 character_beats,描述本章该角色应有的"动作变化",
+            # 与静态的 personality/background 形成对比,让 AI 不再让配角永远做同一组动作。
+            beat = character_beats_map.get(c.name)
+            if beat:
+                info_lines.append(f"  ▶ 本章节拍: {beat}")
+
             # 职业信息
             if c.id in char_career_relations:
                 career_rel = char_career_relations[c.id]
@@ -720,7 +790,7 @@ class OneToManyContextBuilder:
             if len(content) <= max_length:
                 result_info['ending_text'] = content
             else:
-                result_info['ending_text'] = content[-max_length:]
+                result_info['ending_text'] = _tail_on_boundary(content, max_length)
         
         # 2. 获取上一章摘要
         summary_result = await db.execute(

@@ -1,7 +1,26 @@
 """项目相关的Pydantic模型"""
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from datetime import datetime
+
+
+class ProtagonistVoice(BaseModel):
+    """主角叙述声音约束 - 喂给 NarratorVoiceDecorator"""
+    age: Optional[int] = Field(None, ge=5, le=120, description="主角当前年龄")
+    era: Optional[str] = Field(None, description="时代背景, 例如 '2008年'")
+    forbidden_vocab: List[str] = Field(
+        default_factory=list,
+        description="禁止主角心理活动出现的词汇/概念"
+    )
+
+
+class GenerationSettings(BaseModel):
+    """项目级生成偏好,持久化到 projects.generation_settings JSON 列"""
+    protagonist_voice: Optional[ProtagonistVoice] = None
+    subplots: List[str] = Field(
+        default_factory=list,
+        description="项目级支线名称列表, 供规划阶段排布推进节奏"
+    )
 
 
 class ProjectBase(BaseModel):
@@ -38,6 +57,7 @@ class ProjectUpdate(BaseModel):
     chapter_count: Optional[int] = None
     narrative_perspective: Optional[str] = None
     character_count: Optional[int] = None
+    generation_settings: Optional[GenerationSettings] = None
     # current_words 由章节内容自动计算，不允许手动修改
 
 
@@ -61,9 +81,10 @@ class ProjectResponse(ProjectBase):
     cover_error: Optional[str] = None
     cover_updated_at: Optional[datetime] = None
     outline_mode: str  # 显式声明以确保响应中包含
+    generation_settings: Optional[GenerationSettings] = None
     created_at: datetime
     updated_at: datetime
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 

@@ -181,11 +181,31 @@ class SceneData(BaseModel):
     purpose: str = Field(..., description="场景目的")
 
 
+class CharacterBeat(BaseModel):
+    """每章每个角色的行动节拍"""
+    name: str = Field(..., description="角色名")
+    beat: str = Field(..., description="本章该角色的具体行动/心境变化")
+
+
+class SubplotProgression(BaseModel):
+    """支线在本章的推进描述"""
+    subplot: str = Field(..., description="支线名称")
+    step: str = Field(..., description="本章对该支线的具体推进内容")
+
+
 class ExpansionPlanUpdate(BaseModel):
     """章节规划更新模型"""
     summary: Optional[str] = Field(None, description="章节情节概要")
     key_events: Optional[List[str]] = Field(None, description="关键事件列表")
     character_focus: Optional[List[str]] = Field(None, description="涉及角色列表")
+    character_beats: Optional[List[CharacterBeat]] = Field(
+        None,
+        description="本章每个出场角色的具体行动/心境节拍(每个 character_focus 至少一条)",
+    )
+    subplot_progression: Optional[List[SubplotProgression]] = Field(
+        None,
+        description="本章推进的支线列表(项目支线声明的子集)",
+    )
     emotional_tone: Optional[str] = Field(None, description="情感基调")
     narrative_goal: Optional[str] = Field(None, description="叙事目标")
     conflict_type: Optional[str] = Field(None, description="冲突类型")

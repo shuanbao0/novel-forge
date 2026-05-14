@@ -1508,16 +1508,22 @@ class PromptService:
     "plot_summary": "剧情摘要（200-300字）：详细描述该章发生的事件，仅限当前大纲内容",
     "key_events": ["关键事件1", "关键事件2", "关键事件3"],
     "character_focus": ["角色A", "角色B"],
+    "character_beats": [
+      {{"name": "角色A", "beat": "一句话写清本章他/她的具体行动或心境转变，必须比上一章前进一步"}},
+      {{"name": "角色B", "beat": "同上"}}
+    ],
     "emotional_tone": "情感基调（如：紧张、温馨、悲伤）",
     "narrative_goal": "叙事目标（该章要达成的叙事效果）",
     "conflict_type": "冲突类型（如：内心挣扎、人际冲突）",
-    "estimated_words": 3000{scene_field}
+    "estimated_words": <根据本章重要性在 1500-5000 之间取整数，参见下方节奏分配硬约束>{subplot_field}{scene_field}
   }}
 ]
 
 【格式规范】
 - 纯JSON数组输出，无其他文字
 - 内容描述中严禁使用特殊符号
+- character_beats 必须覆盖 character_focus 中的每个角色,beat 描述具体行动/心境而非静态性格
+- estimated_words 必须是 1500-5000 之间的整数,严禁所有章节填同一个值
 </output>
 
 <constraints>
@@ -1525,6 +1531,15 @@ class PromptService:
 ✅ 只能展开当前大纲节点的内容
 ✅ 深化当前大纲，而非跨越到后续
 ✅ 放慢叙事节奏，充分体验当前阶段
+{subplot_directive}
+
+【📏 节奏分配硬约束 - estimated_words 必须有起伏】
+✅ 高潮/对决/重大转折章: 4000-5000 字
+✅ 主线推进/关键冲突章: 3000-4000 字
+✅ 过场/铺垫/支线推进章: 1500-2500 字
+✅ 同一批次的 estimated_words 必须出现至少 3 种不同档位
+❌ 严禁所有章节都填 3000 这种"平均值"——这会让读者觉得节奏死板
+❌ 严禁连续 3 章字数完全一致
 
 ❌ 绝对不能推进到后续大纲内容
 ❌ 不要让剧情快速推进
@@ -1633,10 +1648,14 @@ class PromptService:
     "plot_summary": "剧情摘要（200-300字）：详细描述该章发生的事件",
     "key_events": ["关键事件1", "关键事件2", "关键事件3"],
     "character_focus": ["角色A", "角色B"],
+    "character_beats": [
+      {{"name": "角色A", "beat": "一句话写清本章具体行动或心境转变，必须比上一章前进一步"}},
+      {{"name": "角色B", "beat": "同上"}}
+    ],
     "emotional_tone": "情感基调",
     "narrative_goal": "叙事目标",
     "conflict_type": "冲突类型",
-    "estimated_words": 3000{scene_field}
+    "estimated_words": <根据本章重要性在 1500-5000 之间取整数，参见下方节奏分配硬约束>{subplot_field}{scene_field}
   }}
 ]
 
@@ -1644,6 +1663,8 @@ class PromptService:
 - 纯JSON数组输出，无其他文字
 - 内容描述中严禁使用特殊符号
 - sub_index从{start_index}开始
+- character_beats 必须覆盖 character_focus 中的每个角色,beat 描述具体行动/心境而非静态性格
+- estimated_words 必须是 1500-5000 之间的整数,严禁所有章节填同一个值
 </output>
 
 <constraints>
@@ -1654,6 +1675,15 @@ class PromptService:
 
 ❌ 绝对不能推进到后续大纲内容
 ❌ 不要让剧情快速推进
+{subplot_directive}
+
+【📏 节奏分配硬约束 - estimated_words 必须有起伏】
+✅ 高潮/对决/重大转折章: 4000-5000 字
+✅ 主线推进/关键冲突章: 3000-4000 字
+✅ 过场/铺垫/支线推进章: 1500-2500 字
+✅ 本批次的 estimated_words 必须出现至少 3 种不同档位
+❌ 严禁所有章节都填 3000 这种"平均值"——这会让读者觉得节奏死板
+❌ 严禁连续 3 章字数完全一致
 
 【分批连续性约束】
 ✅ 与前面已生成章节自然衔接

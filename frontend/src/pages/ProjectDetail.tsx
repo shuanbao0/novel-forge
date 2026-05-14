@@ -29,7 +29,8 @@ import FloatingTaskPanel from '../components/FloatingTaskPanel';
 import CreativeContractEditor from '../components/CreativeContractEditor';
 import StylePatternsDrawer from '../components/StylePatternsDrawer';
 import UnifiedSearchDrawer from '../components/UnifiedSearchDrawer';
-import { SafetyCertificateOutlined, ReadOutlined, SearchOutlined } from '@ant-design/icons';
+import GenerationSettingsDrawer from '../components/GenerationSettingsDrawer';
+import { SafetyCertificateOutlined, ReadOutlined, SearchOutlined, ControlOutlined } from '@ant-design/icons';
 
 const { Header, Sider, Content } = Layout;
 
@@ -45,6 +46,7 @@ export default function ProjectDetail() {
   const [contractOpen, setContractOpen] = useState(false);
   const [stylePatternsOpen, setStylePatternsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [generationSettingsOpen, setGenerationSettingsOpen] = useState(false);
   const [mobile, setMobile] = useState(isMobile());
   const { token } = theme.useToken();
   const alphaColor = (color: string, alpha: number) => `color-mix(in srgb, ${color} ${(alpha * 100).toFixed(0)}%, transparent)`;
@@ -191,6 +193,11 @@ export default function ProjectDetail() {
           label: '创作契约',
         },
         {
+          key: 'generation-settings',
+          icon: <ControlOutlined />,
+          label: '生成偏好',
+        },
+        {
           key: 'style-patterns',
           icon: <ReadOutlined />,
           label: '写作模式',
@@ -307,6 +314,8 @@ export default function ProjectDetail() {
         onClick={({ key }) => {
           if (key === 'creative-contract') {
             setContractOpen(true);
+          } else if (key === 'generation-settings') {
+            setGenerationSettingsOpen(true);
           } else if (key === 'style-patterns') {
             setStylePatternsOpen(true);
           } else if (key === 'search') {
@@ -668,6 +677,16 @@ export default function ProjectDetail() {
           projectId={projectId}
           open={searchOpen}
           onClose={() => setSearchOpen(false)}
+        />
+      )}
+
+      {/* 生成偏好 Drawer */}
+      {currentProject && (
+        <GenerationSettingsDrawer
+          project={currentProject}
+          open={generationSettingsOpen}
+          onClose={() => setGenerationSettingsOpen(false)}
+          onSaved={(updated) => setCurrentProject(updated)}
         />
       )}
     </Layout>

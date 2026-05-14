@@ -21,6 +21,85 @@ def _build_contract_blocks(project: Project, outline: Outline) -> tuple[str, str
     volume_block = VolumeBrief.from_raw(outline.creative_brief).to_prompt_block()
     return project_block, volume_block
 
+
+def _sanitize_character_beats(raw, character_focus: list) -> list:
+    """容错解析 LLM 返回的 character_beats。
+
+    可接受形态:
+      - [{"name": "X", "beat": "..."}]  (推荐)
+      - {"X": "..."}                     (老式 dict)
+      - [{"name": "X", "action": "..."}](字段写错)
+    任何无法识别的输入返回空列表(让生成阶段优雅降级)。
+    """
+    if not raw:
+        return []
+    result: list[dict] = []
+    if isinstance(raw, dict):
+        for name, beat in raw.items():
+            if name and beat:
+                result.append({"name": str(name).strip(), "beat": str(beat).strip()})
+    elif isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("name") or item.get("character") or "").strip()
+            beat = (item.get("beat") or item.get("action") or item.get("note") or "").strip()
+            if name and beat:
+                result.append({"name": name, "beat": beat})
+    return result
+
+
+def _sanitize_subplot_progression(raw) -> list:
+    """容错解析 LLM 返回的 subplot_progression。"""
+    if not raw or not isinstance(raw, list):
+        return []
+    result: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        subplot = (item.get("subplot") or item.get("name") or "").strip()
+        step = (item.get("step") or item.get("progress") or "").strip()
+        if subplot and step:
+            result.append({"subplot": subplot, "step": step})
+    return result
+
+
+def _build_subplot_blocks(project: Project) -> tuple[str, str]:
+    """读取项目级支线声明, 返回两段插槽:
+       - subplot_field: 注入到 JSON 模板里的额外字段(以逗号开头),
+         比如 ',"subplot_progression": [{"subplot": ..., "step": ...}]'
+       - subplot_directive: 注入到 constraints 段落的硬指令,
+         告诉规划 AI 必须把支线按节奏分布到不同章节
+       若项目未声明支线, 两段都返回空串(模板里 {subplot_field}{subplot_directive} 等价无操作)。
+    """
+    settings = getattr(project, "generation_settings", None) or {}
+    if not isinstance(settings, dict):
+        return "", ""
+    subplots = settings.get("subplots") or []
+    if not isinstance(subplots, list):
+        return "", ""
+    subplots = [s.strip() for s in subplots if isinstance(s, str) and s.strip()]
+    if not subplots:
+        return "", ""
+    field_examples = ",\n".join(
+        f'      {{"subplot": "{name}", "step": "本章对该支线的具体推进; 若本章不推进可省略此条"}}'
+        for name in subplots
+    )
+    field_snippet = (
+        ',\n    "subplot_progression": [\n'
+        f"{field_examples}\n"
+        "    ]"
+    )
+    names = "、".join(subplots)
+    directive = (
+        "\n【📈 支线推进硬约束】\n"
+        f"✅ 项目级支线: {names}\n"
+        "✅ 在本批章节里, 每条支线至少推进 1 次(放在合适的章节, 不要全堆在最后一章)\n"
+        "✅ subplot_progression 数组只包含本章真实推进的支线; 不推进的支线可省略\n"
+        "❌ 严禁连续 5 章对同一支线零推进\n"
+    )
+    return field_snippet, directive
+
 logger = get_logger(__name__)
 
 
@@ -119,6 +198,7 @@ class PlotExpansionService:
 
         # 读取契约 - 项目级 + 卷级
         project_contract_block, volume_brief_block = _build_contract_blocks(project, outline)
+        subplot_field, subplot_directive = _build_subplot_blocks(project)
 
         # 获取自定义提示词模板
         template = await PromptService.get_template("OUTLINE_EXPAND_SINGLE", project.user_id, db)
@@ -142,7 +222,9 @@ class PlotExpansionService:
             strategy_instruction=expansion_strategy,
             target_chapter_count=target_chapter_count,
             scene_instruction="",  # 暂时为空
-            scene_field=""  # 暂时为空
+            scene_field="",  # 暂时为空
+            subplot_field=subplot_field,
+            subplot_directive=subplot_directive,
         )
         
         # 调用AI生成章节规划
@@ -198,6 +280,7 @@ class PlotExpansionService:
 
         # 读取契约 - 项目级 + 卷级(所有批次共用)
         project_contract_block, volume_brief_block = _build_contract_blocks(project, outline)
+        subplot_field, subplot_directive = _build_subplot_blocks(project)
 
         all_chapter_plans = []
         
@@ -276,7 +359,9 @@ class PlotExpansionService:
                 end_index=current_start_index + current_batch_size - 1,
                 target_chapter_count=current_batch_size,
                 scene_instruction="", # 暂时为空
-                scene_field="" # 暂时为空
+                scene_field="", # 暂时为空
+                subplot_field=subplot_field,
+                subplot_directive=subplot_directive,
             )
             
             # 调用AI生成当前批次
@@ -463,11 +548,17 @@ class PlotExpansionService:
             expansion_plan_json = json.dumps({
                 "key_events": plan.get("key_events", []),
                 "character_focus": plan.get("character_focus", []),
+                "character_beats": _sanitize_character_beats(
+                    plan.get("character_beats"), plan.get("character_focus", [])
+                ),
+                "subplot_progression": _sanitize_subplot_progression(
+                    plan.get("subplot_progression")
+                ),
                 "emotional_tone": plan.get("emotional_tone", ""),
                 "narrative_goal": plan.get("narrative_goal", ""),
                 "conflict_type": plan.get("conflict_type", ""),
                 "estimated_words": plan.get("estimated_words", 3000),
-                "scenes": plan.get("scenes", []) if plan.get("scenes") else None
+                "scenes": plan.get("scenes", []) if plan.get("scenes") else None,
             }, ensure_ascii=False)
             
             chapter = Chapter(
@@ -583,36 +674,19 @@ class PlotExpansionService:
             return chapter_plans
             
         except json.JSONDecodeError as e:
-            logger.error(f"❌ 解析AI响应失败: {e}, 响应内容: {ai_response[:500]}")
-            # 返回一个基础规划
-            return [{
-                "outline_id": outline_id,
-                "sub_index": 1,
-                "title": "AI解析失败的默认章节",
-                "plot_summary": ai_response[:500],
-                "key_events": ["解析失败"],
-                "character_focus": [],
-                "emotional_tone": "未知",
-                "narrative_goal": "需要重新生成",
-                "conflict_type": "未知",
-                "ending_type": "未知",
-                "estimated_words": 3000
-            }]
+            # 解析失败必须抛出,而不是返回一个伪造的"AI解析失败的默认章节"。
+            # 旧实现会把这条假章节落库,导出时就会出现在 txt 文件末尾。
+            # 让异常向上传播,由批量任务或调用方决定重试 / 中止 / 跳过本批。
+            snippet = (ai_response or "")[:500]
+            logger.error(f"❌ 解析AI响应失败(outline={outline_id}): {e}, 响应片段: {snippet}")
+            raise RuntimeError(
+                f"章节规划AI响应JSON解析失败(outline={outline_id}): {e}"
+            ) from e
         except Exception as e:
-            logger.error(f"❌ 解析异常: {str(e)}")
-            return [{
-                "outline_id": outline_id,
-                "sub_index": 1,
-                "title": "解析异常的默认章节",
-                "plot_summary": "系统错误",
-                "key_events": [],
-                "character_focus": [],
-                "emotional_tone": "未知",
-                "narrative_goal": "需要重新生成",
-                "conflict_type": "未知",
-                "ending_type": "未知",
-                "estimated_words": 3000
-            }]
+            logger.error(f"❌ 解析异常(outline={outline_id}): {str(e)}")
+            raise RuntimeError(
+                f"章节规划解析异常(outline={outline_id}): {e}"
+            ) from e
 
 
     async def _renumber_subsequent_chapters(

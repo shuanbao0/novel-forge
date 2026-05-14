@@ -3149,6 +3149,33 @@ async def execute_batch_generation_in_order(
             await db_session.close()
 
 
+def _resolve_target_word_count(chapter: Chapter, batch_default: int) -> int:
+    """根据章节规划解析本章目标字数。
+
+    优先级:
+      1. expansion_plan.estimated_words(规划阶段每章特定的字数预算)
+      2. batch_default(批量请求层的统一字数)
+
+    边界:
+      - 下限 500 字(避免过短章节)
+      - 上限 min(batch_default * 1.5, 10000)(防止 LLM 规划写飞)
+
+    解析失败或字段缺失时静默回退到 batch_default。
+    """
+    raw_plan = getattr(chapter, "expansion_plan", None)
+    if not raw_plan:
+        return batch_default
+    try:
+        plan = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+    except (TypeError, ValueError):
+        return batch_default
+    estimated = plan.get("estimated_words") if isinstance(plan, dict) else None
+    if not isinstance(estimated, (int, float)) or estimated <= 0:
+        return batch_default
+    upper = min(int(batch_default * 1.5), 10000)
+    return max(500, min(int(estimated), upper))
+
+
 async def generate_single_chapter_for_batch(
     db_session: AsyncSession,
     chapter: Chapter,
@@ -3186,6 +3213,11 @@ async def generate_single_chapter_for_batch(
             if target is not None:
                 batch_task.current_chapter_target_chars = target
             await db_session.commit()
+
+    # 📐 解析每章实际目标字数:优先使用规划阶段的 estimated_words,
+    # 让"高潮章 5000 字,过场章 2000 字"这类节拍能落地,而不是所有章一刀切。
+    # batch 级别 target_word_count 作为兜底 + 上限保护(防 LLM 规划阶段写飞)。
+    target_word_count = _resolve_target_word_count(chapter, target_word_count)
 
     await _report_progress(phase="loading", chars=0, target=target_word_count)
 
@@ -3316,7 +3348,18 @@ async def generate_single_chapter_for_batch(
         chunk_count += 1
         if chunk_count % 10 == 0:
             await _report_progress(chars=len(full_content))
-    
+
+    # 校验流式产出：上游限流/超时可能让 generate_text_stream 静默返回零 chunk,
+    # 此时 full_content 为空但不抛异常,会被错误地标记 status="completed"。
+    # 抛出 RuntimeError 让外层重试逻辑(指数退避)接管。
+    stripped_len = len(full_content.strip())
+    min_acceptable = max(200, int(target_word_count * 0.1))
+    if stripped_len < min_acceptable:
+        raise RuntimeError(
+            f"流式生成产出过少: 第{chapter.chapter_number}章 实得 {stripped_len} 字, "
+            f"低于最低阈值 {min_acceptable} 字 (目标 {target_word_count}, chunks={chunk_count})"
+        )
+
     # 更新章节内容到数据库（使用锁保护）
     async with write_lock:
         old_word_count = chapter.word_count or 0

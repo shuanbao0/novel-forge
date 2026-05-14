@@ -5,10 +5,12 @@ from app.repositories.email_verification_repo import (
     VerificationRecord,
     VerificationLookup,
 )
+from app.repositories.motif_repo import MotifRepository
 
 __all__ = [
     "OAuthStateRepository",
     "EmailVerificationRepository",
     "VerificationRecord",
     "VerificationLookup",
+    "MotifRepository",
 ]
