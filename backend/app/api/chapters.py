@@ -1567,10 +1567,10 @@ async def generate_chapter_content_stream(
                 logger.info(f"开始AI流式创作章节 {chapter_id}")
                 
                 # 🔢 计算 max_tokens 限制
-                # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
-                # 同时设置上限防止过长，下限确保基本可用
-                calculated_max_tokens = int(target_word_count * 3)
-                calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))  # 限制在 2000-16000 之间
+                # 中文字符约 1.5-2 个 token，使用 1.8 倍系数 ≈ token 上限 + 少量 buffer 收尾
+                # 系数过大会让 max_tokens 失去硬截断作用，导致实际字数远超目标
+                calculated_max_tokens = int(target_word_count * 1.8)
+                calculated_max_tokens = max(1500, min(calculated_max_tokens, 16000))
                 logger.info(f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
                 
                 # 准备生成参数
@@ -1953,8 +1953,9 @@ async def _run_chapter_generation_bg(
     # === 准备阶段 ===
     await tracker.preparing("准备AI提示词...")
 
-    calculated_max_tokens = int(target_word_count * 3)
-    calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))
+    # 中文 1 字 ≈ 1.5-2 token，1.8 倍系数 ≈ token 上限 + 少量收尾 buffer
+    calculated_max_tokens = int(target_word_count * 1.8)
+    calculated_max_tokens = max(1500, min(calculated_max_tokens, 16000))
 
     generate_kwargs = {
         "prompt": prompt,
@@ -3287,10 +3288,10 @@ async def generate_single_chapter_for_batch(
     )
 
     # 🔢 计算 max_tokens 限制（批量生成）
-    # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
-    # 同时设置上限防止过长，下限确保基本可用
-    calculated_max_tokens = int(target_word_count * 3)
-    calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))  # 限制在 2000-16000 之间
+    # 中文字符约 1.5-2 个 token，使用 1.8 倍系数 ≈ token 上限 + 少量 buffer 收尾
+    # 系数过大会让 max_tokens 失去硬截断作用，导致实际字数远超目标
+    calculated_max_tokens = int(target_word_count * 1.8)
+    calculated_max_tokens = max(1500, min(calculated_max_tokens, 16000))
     logger.info(f"📊 批量生成 - 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
     
     # 非流式生成内容
