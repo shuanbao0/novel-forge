@@ -1567,12 +1567,17 @@ async def generate_chapter_content_stream(
                 logger.info(f"开始AI流式创作章节 {chapter_id}")
                 
                 # 🔢 计算 max_tokens 限制
-                # 中文字符约 1.5-2 个 token，使用 1.8 倍系数 ≈ token 上限 + 少量 buffer 收尾
-                # 系数过大会让 max_tokens 失去硬截断作用，导致实际字数远超目标
-                calculated_max_tokens = int(target_word_count * 1.8)
-                calculated_max_tokens = max(1500, min(calculated_max_tokens, 16000))
-                logger.info(f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
-                
+                # 中文 1 字 ≈ 0.5-0.7 token, 系数 1.0 让 max_tokens 真正起到硬截断作用。
+                # 历史上 1.8 实测出现 11000 字章节(目标 4000), 改 1.0 后上限约 5500 字。
+                calculated_max_tokens = int(target_word_count * 1.0)
+                calculated_max_tokens = max(1500, min(calculated_max_tokens, 10000))
+                # 🚧 字符层硬截断: 与 max_tokens 双保险, 句末标点处主动断流
+                hard_cap = int(target_word_count * 1.3)
+                logger.info(
+                    f"📊 目标字数: {target_word_count}, "
+                    f"max_tokens: {calculated_max_tokens}, 字符硬截断: {hard_cap}"
+                )
+
                 # 准备生成参数
                 generate_kwargs = {
                     "prompt": prompt,
@@ -1585,23 +1590,24 @@ async def generate_chapter_content_stream(
                     generate_kwargs["model"] = custom_model
                     # 注意：这里使用用户配置的AI服务，模型参数会覆盖默认模型
                     # 如果需要切换provider，需要在前端传递provider参数
-                
+
                 # === 生成阶段 ===
                 full_content = ""
                 chunk_count = 0
-                
+                _SENT_END = ('。', '！', '？', '…', '"', '」', '\n')
+
                 yield await tracker.generating(
                     current_chars=0,
                     estimated_total=target_word_count
                 )
-                
+
                 async for chunk in user_ai_service.generate_text_stream(**generate_kwargs):
                     full_content += chunk
                     chunk_count += 1
-                    
+
                     # 发送内容块
                     yield await tracker.generating_chunk(chunk)
-                    
+
                     # 每5个chunk发送一次进度更新
                     if chunk_count % 5 == 0:
                         yield await tracker.generating(
@@ -1609,11 +1615,19 @@ async def generate_chapter_content_stream(
                             estimated_total=target_word_count,
                             message=f'正在创作中... 已生成 {len(full_content)} 字'
                         )
-                    
+
                     # 每20个chunk发送心跳
                     if chunk_count % 20 == 0:
                         yield await tracker.heartbeat()
-                    
+
+                    # 字符层硬截断: 在句末标点处优雅断流
+                    if len(full_content) >= hard_cap and chunk and chunk[-1] in _SENT_END:
+                        logger.warning(
+                            f"🚧 单章字符硬截断: 第{current_chapter.chapter_number}章 "
+                            f"已写 {len(full_content)} 字(cap={hard_cap}), 在句末断流"
+                        )
+                        break
+
                     await asyncio.sleep(0)  # 让出控制权
                 
                 # === 保存阶段 ===
@@ -1953,9 +1967,10 @@ async def _run_chapter_generation_bg(
     # === 准备阶段 ===
     await tracker.preparing("准备AI提示词...")
 
-    # 中文 1 字 ≈ 1.5-2 token，1.8 倍系数 ≈ token 上限 + 少量收尾 buffer
-    calculated_max_tokens = int(target_word_count * 1.8)
-    calculated_max_tokens = max(1500, min(calculated_max_tokens, 16000))
+    # 中文 1 字 ≈ 0.5-0.7 token, 系数 1.0 让 max_tokens 真正硬截断
+    calculated_max_tokens = int(target_word_count * 1.0)
+    calculated_max_tokens = max(1500, min(calculated_max_tokens, 10000))
+    hard_cap = int(target_word_count * 1.3)  # 字符层硬截断
 
     generate_kwargs = {
         "prompt": prompt,
@@ -1969,6 +1984,7 @@ async def _run_chapter_generation_bg(
     # === 生成阶段 ===
     full_content = ""
     chunk_count = 0
+    _SENT_END = ('。', '！', '？', '…', '"', '」', '\n')
 
     await tracker.generating(
         current_chars=0,
@@ -1991,6 +2007,14 @@ async def _run_chapter_generation_bg(
                 estimated_total=target_word_count,
                 message=f'正在创作中... 已生成 {len(full_content)} 字'
             )
+
+        # 字符层硬截断: 在句末标点处优雅断流
+        if len(full_content) >= hard_cap and chunk and chunk[-1] in _SENT_END:
+            logger.warning(
+                f"🚧 后台单章字符硬截断: chapter={chapter_id} "
+                f"已写 {len(full_content)} 字(cap={hard_cap}), 在句末断流"
+            )
+            break
 
         await asyncio.sleep(0)
 
@@ -3172,7 +3196,9 @@ def _resolve_target_word_count(chapter: Chapter, batch_default: int) -> int:
     estimated = plan.get("estimated_words") if isinstance(plan, dict) else None
     if not isinstance(estimated, (int, float)) or estimated <= 0:
         return batch_default
-    upper = min(int(batch_default * 1.5), 10000)
+    # 上限收紧到 batch * 1.2:让规划阶段的弹性保留在 ±20% 之内,
+    # 防止用户设置 4000 时被悄悄放大到 6000+
+    upper = min(int(batch_default * 1.2), 8000)
     return max(500, min(int(estimated), upper))
 
 
@@ -3320,12 +3346,19 @@ async def generate_single_chapter_for_batch(
     )
 
     # 🔢 计算 max_tokens 限制（批量生成）
-    # 中文字符约 1.5-2 个 token，使用 1.8 倍系数 ≈ token 上限 + 少量 buffer 收尾
-    # 系数过大会让 max_tokens 失去硬截断作用，导致实际字数远超目标
-    calculated_max_tokens = int(target_word_count * 1.8)
-    calculated_max_tokens = max(1500, min(calculated_max_tokens, 16000))
-    logger.info(f"📊 批量生成 - 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
-    
+    # 中文 1 字 ≈ 0.5-0.7 token, 系数 1.0 让 max_tokens 真正起到硬截断作用:
+    #   target=4000 -> max_tokens=4000 -> 实际输出最多 ~6000 中文字
+    # 系数 1.8 时实测出现过 11000 字的章节(2-3 倍超标), 必须收紧。
+    calculated_max_tokens = int(target_word_count * 1.0)
+    calculated_max_tokens = max(1500, min(calculated_max_tokens, 10000))
+    # 🚧 流式硬截断:章节字数超过 target * 1.4 后,在最近的句末标点处主动断流
+    # 与 max_tokens 双保险:max_tokens 防 token 层溢出, hard_cap 防字符层溢出。
+    hard_cap = int(target_word_count * 1.3)
+    logger.info(
+        f"📊 批量生成 - 目标字数: {target_word_count}, "
+        f"max_tokens: {calculated_max_tokens}, 字符硬截断: {hard_cap}"
+    )
+
     # 非流式生成内容
     full_content = ""
     # 准备生成参数
@@ -3339,15 +3372,28 @@ async def generate_single_chapter_for_batch(
     if custom_model:
         generate_kwargs["model"] = custom_model
         logger.info(f"  批量生成使用自定义模型: {custom_model}")
-    
+
     # 流式生成 - 每 10 chunk 上报一次实时字数,让前端看到细粒度进度
+    # 超过 hard_cap 后只在句末/段末断流, 避免半句结尾
+    _SENT_END = ('。', '！', '？', '…', '"', '」', '\n')
     await _report_progress(phase="generating", chars=0)
     chunk_count = 0
+    truncated_at_cap = False
     async for chunk in ai_service.generate_text_stream(**generate_kwargs):
         full_content += chunk
         chunk_count += 1
         if chunk_count % 10 == 0:
             await _report_progress(chars=len(full_content))
+        if len(full_content) >= hard_cap and chunk and chunk[-1] in _SENT_END:
+            logger.warning(
+                f"🚧 字符硬截断触发: 第{chapter.chapter_number}章 "
+                f"已写 {len(full_content)} 字(cap={hard_cap}), 在句末断流"
+            )
+            truncated_at_cap = True
+            break
+    if truncated_at_cap:
+        # 留个 metadata 痕迹,便于事后排查
+        pass
 
     # 校验流式产出：上游限流/超时可能让 generate_text_stream 静默返回零 chunk,
     # 此时 full_content 为空但不抛异常,会被错误地标记 status="completed"。

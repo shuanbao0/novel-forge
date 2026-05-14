@@ -71,12 +71,18 @@ async def build_base_chapter_prompt(
     template_name = _TEMPLATE_KEY[(mode, has_continuation)]
     template = await PromptService.get_template(template_name, user_id, db)
 
+    # 硬上限在 Python 侧算好,避免 prompt 里出现 "4000*1.2" 这种需要 LLM 心算的写法。
+    # 与生成端 hard_cap=target*1.3 + max_tokens=target*1.0 形成三层防线,
+    # 这里 1.2 是给 AI 的"明面承诺",留 0.1 的余量缓冲断流。
+    hard_ceiling = int(target_word_count * 1.2)
+
     fmt_kwargs = dict(
         project_title=project.title,
         chapter_number=chapter.chapter_number,
         chapter_title=chapter.title,
         chapter_outline=chapter_context.chapter_outline,
         target_word_count=target_word_count,
+        hard_ceiling=hard_ceiling,
         genre=project.genre or "未设定",
         narrative_perspective=narrative_perspective,
         characters_info=chapter_context.chapter_characters or "暂无角色信息",
