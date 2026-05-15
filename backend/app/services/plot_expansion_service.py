@@ -9,10 +9,34 @@ from app.models.project import Project
 from app.models.character import Character
 from app.models.chapter import Chapter
 from app.services.ai_service import AIService
+from app.services.blueprint_validator import BlueprintValidator, BlueprintRejected
 from app.services.creative_contract import CreativeContract, VolumeBrief
 from app.services.json_helper import loads_json
 from app.services.prompt_service import prompt_service, PromptService
 from app.logger import get_logger
+
+
+# 蓝图验证关重试上限. 每次重试都会把上轮违规清单注入 prompt, 让 LLM 修复.
+# 最后一次仍失败时, 放行并打 warning, 不阻塞用户主流程(质量降级好过整流程卡死).
+MAX_BLUEPRINT_RETRIES = 2
+
+
+# 让 OUTLINE_EXPAND_* 模板默认产出 scenes 字段, 否则蓝图验证关读 scenes[0].location
+# 永远空, 100% 触发兜底错误 → 重试无效 → 最后放行 (= Fix 1 失效).
+# scene_instruction 在 <constraints> 段中告诉 LLM 必须输出; scene_field 是 JSON 输出 schema
+# 的额外字段, 用逗号开头与前一项目衔接 (模板里写法是 {previous_field}{scene_field}).
+_DEFAULT_SCENE_INSTRUCTION = (
+    "\n【场景输出硬约束】\n"
+    "✅ 每章必须给出 scenes 数组, 至少 1 个对象, 第一个对象的 location 字段必填\n"
+    "✅ scenes[0].location 是本章主场景, 必须具体到地点(如 \"教室晚自习\"/\"校门口小摊\"),\n"
+    "  不要写 \"学校\"/\"家里\" 这种泛指, 也不要留空\n"
+    "✅ scenes[0].location 会被蓝图验证关检查, 同一批次内 ⌈N/3⌉ 个唯一值是硬下限\n"
+)
+_DEFAULT_SCENE_FIELD = (
+    ',\n    "scenes": [\n'
+    '      {"location": "主场景的具体地点", "atmosphere": "氛围", "duration": "持续时长"}\n'
+    "    ]"
+)
 
 
 def _build_contract_blocks(project: Project, outline: Outline) -> tuple[str, str]:
@@ -105,9 +129,58 @@ logger = get_logger(__name__)
 
 class PlotExpansionService:
     """大纲剧情展开服务"""
-    
+
     def __init__(self, ai_service: AIService):
         self.ai_service = ai_service
+        self._validator = BlueprintValidator()
+
+    async def _generate_and_validate(
+        self,
+        *,
+        make_prompt,
+        provider: Optional[str],
+        model: Optional[str],
+        outline_id: str,
+        label: str,
+    ) -> List[Dict[str, Any]]:
+        """LLM 流式生成 + 蓝图验证关 + 失败重试.
+
+        Args:
+            make_prompt: 接收 `feedback_block: str` 并返回完整 prompt 的可调用对象.
+                         首轮调用传空串, 重试时把上一轮的 BlueprintRejected.to_feedback_block()
+                         传入, 让 LLM 看到具体违规项并修复.
+            label: 日志用的批次标签, 例 "单批次" / "第 2/3 批".
+
+        Returns: 通过验证(或最后一轮兜底放行)的 chapter_plans 列表.
+        """
+        feedback_block = ""
+        last_plans: List[Dict[str, Any]] = []
+        for attempt in range(MAX_BLUEPRINT_RETRIES + 1):
+            prompt = make_prompt(feedback_block)
+            accumulated_text = ""
+            async for chunk in self.ai_service.generate_text_stream(
+                prompt=prompt, provider=provider, model=model
+            ):
+                accumulated_text += chunk
+            last_plans = self._parse_expansion_response(accumulated_text, outline_id)
+            try:
+                self._validator.check(last_plans)
+                if attempt > 0:
+                    logger.info(f"✅ {label} 蓝图第 {attempt + 1} 轮通过验证")
+                return last_plans
+            except BlueprintRejected as exc:
+                logger.warning(
+                    f"⚠️ {label} 蓝图第 {attempt + 1}/{MAX_BLUEPRINT_RETRIES + 1} 轮被拒: "
+                    f"{exc}"
+                )
+                if attempt >= MAX_BLUEPRINT_RETRIES:
+                    logger.warning(
+                        f"⚠️ {label} 蓝图重试已达上限 {MAX_BLUEPRINT_RETRIES + 1} 次, "
+                        f"放行最后一轮结果(质量降级)"
+                    )
+                    return last_plans
+                feedback_block = exc.to_feedback_block()
+        return last_plans
     
     async def analyze_outline_for_chapters(
         self,
@@ -181,7 +254,7 @@ class PlotExpansionService:
         provider: Optional[str],
         model: Optional[str]
     ) -> List[Dict[str, Any]]:
-        """单批次生成章节规划"""
+        """单批次生成章节规划 (含蓝图验证关重试)."""
         # 获取角色信息
         characters_result = await db.execute(
             select(Character).where(Character.project_id == project.id)
@@ -192,7 +265,7 @@ class PlotExpansionService:
             f"{char.personality[:100] if char.personality else '暂无描述'}"
             for char in characters
         ])
-        
+
         # 获取大纲上下文（前后大纲）
         context_info = await self._get_outline_context(outline, project.id, db)
 
@@ -202,47 +275,42 @@ class PlotExpansionService:
 
         # 获取自定义提示词模板
         template = await PromptService.get_template("OUTLINE_EXPAND_SINGLE", project.user_id, db)
-        # 格式化提示词
-        prompt = PromptService.format_prompt(
-            template,
-            project_title=project.title,
-            project_genre=project.genre or '通用',
-            project_theme=project.theme or '未设定',
-            project_narrative_perspective=project.narrative_perspective or '第三人称',
-            project_world_time_period=project.world_time_period or '未设定',
-            project_world_location=project.world_location or '未设定',
-            project_world_atmosphere=project.world_atmosphere or '未设定',
-            characters_info=characters_info or '暂无角色',
-            outline_order_index=outline.order_index,
-            outline_title=outline.title,
-            outline_content=outline.content,
-            context_info=context_info,
-            project_contract_block=project_contract_block or "(项目级契约未设置)",
-            volume_brief_block=volume_brief_block or "(本卷契约未设置)",
-            strategy_instruction=expansion_strategy,
-            target_chapter_count=target_chapter_count,
-            scene_instruction="",  # 暂时为空
-            scene_field="",  # 暂时为空
-            subplot_field=subplot_field,
-            subplot_directive=subplot_directive,
-        )
-        
-        # 调用AI生成章节规划
-        logger.info(f"调用AI生成章节规划...")
-        accumulated_text = ""
-        async for chunk in self.ai_service.generate_text_stream(
-            prompt=prompt,
+
+        def make_prompt(feedback_block: str) -> str:
+            # 把验证关反馈前置, 让 LLM 在还没读到主任务时就看到上轮违规
+            prefix = f"{feedback_block}\n\n" if feedback_block else ""
+            return prefix + PromptService.format_prompt(
+                template,
+                project_title=project.title,
+                project_genre=project.genre or '通用',
+                project_theme=project.theme or '未设定',
+                project_narrative_perspective=project.narrative_perspective or '第三人称',
+                project_world_time_period=project.world_time_period or '未设定',
+                project_world_location=project.world_location or '未设定',
+                project_world_atmosphere=project.world_atmosphere or '未设定',
+                characters_info=characters_info or '暂无角色',
+                outline_order_index=outline.order_index,
+                outline_title=outline.title,
+                outline_content=outline.content,
+                context_info=context_info,
+                project_contract_block=project_contract_block or "(项目级契约未设置)",
+                volume_brief_block=volume_brief_block or "(本卷契约未设置)",
+                strategy_instruction=expansion_strategy,
+                target_chapter_count=target_chapter_count,
+                scene_instruction=_DEFAULT_SCENE_INSTRUCTION,
+                scene_field=_DEFAULT_SCENE_FIELD,
+                subplot_field=subplot_field,
+                subplot_directive=subplot_directive,
+            )
+
+        logger.info("调用AI生成章节规划...")
+        chapter_plans = await self._generate_and_validate(
+            make_prompt=make_prompt,
             provider=provider,
-            model=model
-        ):
-            accumulated_text += chunk
-        
-        # 提取内容
-        ai_content = accumulated_text
-        
-        # 解析AI响应
-        chapter_plans = self._parse_expansion_response(ai_content, outline.id)
-        
+            model=model,
+            outline_id=outline.id,
+            label="单批次",
+        )
         logger.info(f"成功生成 {len(chapter_plans)} 个章节规划")
         return chapter_plans
     
@@ -336,56 +404,58 @@ class PlotExpansionService:
 """
             # 获取自定义提示词模板
             template = await PromptService.get_template("OUTLINE_EXPAND_MULTI", project.user_id, db)
-            # 格式化提示词
-            prompt = PromptService.format_prompt(
-                template,
-                project_title=project.title,
-                project_genre=project.genre or '通用',
-                project_theme=project.theme or '未设定',
-                project_narrative_perspective=project.narrative_perspective or '第三人称',
-                project_world_time_period=project.world_time_period or '未设定',
-                project_world_location=project.world_location or '未设定',
-                project_world_atmosphere=project.world_atmosphere or '未设定',
-                characters_info=characters_info or '暂无角色',
-                outline_order_index=outline.order_index,
-                outline_title=outline.title,
-                outline_content=outline.content,
-                context_info=context_info,
-                previous_context=previous_context,
-                project_contract_block=project_contract_block or "(项目级契约未设置)",
-                volume_brief_block=volume_brief_block or "(本卷契约未设置)",
-                strategy_instruction=expansion_strategy,
-                start_index=current_start_index,
-                end_index=current_start_index + current_batch_size - 1,
-                target_chapter_count=current_batch_size,
-                scene_instruction="", # 暂时为空
-                scene_field="", # 暂时为空
-                subplot_field=subplot_field,
-                subplot_directive=subplot_directive,
-            )
-            
-            # 调用AI生成当前批次
+
+            # 闭包捕获本批次所有可变量, 给 _generate_and_validate 复用
+            _start = current_start_index
+            _end = current_start_index + current_batch_size - 1
+            _size = current_batch_size
+            _prev_ctx = previous_context
+
+            def make_prompt(feedback_block: str, _tmpl=template, _start=_start,
+                            _end=_end, _size=_size, _prev=_prev_ctx) -> str:
+                prefix = f"{feedback_block}\n\n" if feedback_block else ""
+                return prefix + PromptService.format_prompt(
+                    _tmpl,
+                    project_title=project.title,
+                    project_genre=project.genre or '通用',
+                    project_theme=project.theme or '未设定',
+                    project_narrative_perspective=project.narrative_perspective or '第三人称',
+                    project_world_time_period=project.world_time_period or '未设定',
+                    project_world_location=project.world_location or '未设定',
+                    project_world_atmosphere=project.world_atmosphere or '未设定',
+                    characters_info=characters_info or '暂无角色',
+                    outline_order_index=outline.order_index,
+                    outline_title=outline.title,
+                    outline_content=outline.content,
+                    context_info=context_info,
+                    previous_context=_prev,
+                    project_contract_block=project_contract_block or "(项目级契约未设置)",
+                    volume_brief_block=volume_brief_block or "(本卷契约未设置)",
+                    strategy_instruction=expansion_strategy,
+                    start_index=_start,
+                    end_index=_end,
+                    target_chapter_count=_size,
+                    scene_instruction=_DEFAULT_SCENE_INSTRUCTION,
+                    scene_field=_DEFAULT_SCENE_FIELD,
+                    subplot_field=subplot_field,
+                    subplot_directive=subplot_directive,
+                )
+
             logger.info(f"调用AI生成第{batch_num + 1}批...")
-            accumulated_text = ""
-            async for chunk in self.ai_service.generate_text_stream(
-                prompt=prompt,
+            batch_plans = await self._generate_and_validate(
+                make_prompt=make_prompt,
                 provider=provider,
-                model=model
-            ):
-                accumulated_text += chunk
-            
-            # 提取内容
-            ai_content = accumulated_text
-            
-            # 解析AI响应
-            batch_plans = self._parse_expansion_response(ai_content, outline.id)
-            
+                model=model,
+                outline_id=outline.id,
+                label=f"第 {batch_num + 1}/{total_batches} 批",
+            )
+
             # 调整sub_index以保持连续性
             for i, plan in enumerate(batch_plans):
                 plan["sub_index"] = current_start_index + i
-            
+
             all_chapter_plans.extend(batch_plans)
-            
+
             logger.info(f"第{batch_num + 1}批生成完成，本批生成{len(batch_plans)}章，累计{len(all_chapter_plans)}章")
         
         logger.info(f"分批生成完成，共生成 {len(all_chapter_plans)} 个章节规划")
@@ -472,12 +542,34 @@ class PlotExpansionService:
                     "chapter_count": 0
                 })
         
+        # 跨大纲项目级验证: 单 outline 内的 SceneVarietyRule 不能捕捉
+        # "3 个 outline 各 4 章但 12 章全在同一场景"这种全局塌缩. 这里只读不写,
+        # 发现问题写 warning 到日志和返回结构, 不阻塞 (因为重试要跨多个 outline
+        # 重新协调成本太高, 留给用户人工修正).
+        try:
+            from app.services.blueprint_validator import validate_project_blueprint
+            id_to_plans = {
+                e["outline_id"]: e["chapter_plans"]
+                for e in expansions
+                if "chapter_plans" in e
+            }
+            project_errors = validate_project_blueprint(id_to_plans)
+            if project_errors:
+                for err in project_errors:
+                    logger.warning(f"⚠️ 跨大纲蓝图问题: {err.detail}")
+        except Exception as exc:
+            logger.warning(f"⚠️ 项目级蓝图验证异常(跳过): {exc}")
+            project_errors = []
+
         result = {
             "total_outlines": len(outlines),
             "total_chapters_planned": total_chapters,
-            "expansions": expansions
+            "expansions": expansions,
+            "project_blueprint_warnings": [
+                {"rule": e.rule, "detail": e.detail} for e in project_errors
+            ],
         }
-        
+
         logger.info(f"批量展开完成: {len(outlines)} 个大纲 → {total_chapters} 个章节规划")
         return result
     
@@ -503,7 +595,20 @@ class PlotExpansionService:
             创建的章节列表
         """
         logger.info(f"根据规划创建 {len(chapter_plans)} 个章节记录")
-        
+
+        # 蓝图验证关 - 跑一遍但只打 warning, 不阻塞 (用户手编 plans 时允许通过,
+        # 但日志能让我们追踪问题). 与 _generate_and_validate 的"重试 + 兜底放行"
+        # 不同, 这里没有 LLM 可以重试.
+        try:
+            errors = self._validator.validate(chapter_plans)
+            if errors:
+                logger.warning(
+                    f"⚠️ create_chapters_from_plans 检测到蓝图问题(已放行):\n  "
+                    + "\n  ".join(e.to_feedback_line() for e in errors)
+                )
+        except Exception as exc:
+            logger.warning(f"⚠️ create_chapters_from_plans 蓝图验证异常(忽略): {exc}")
+
         # 如果没有指定起始章节号，根据大纲顺序自动计算
         if start_chapter_number is None:
             # 1. 获取当前大纲信息

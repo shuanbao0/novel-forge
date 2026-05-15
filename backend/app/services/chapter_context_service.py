@@ -334,6 +334,12 @@ class OneToManyContextBuilder:
 情感基调：{plan.get('emotional_tone', '未设定')}
 叙事目标：{plan.get('narrative_goal', '未设定')}
 冲突类型：{plan.get('conflict_type', '未设定')}"""
+                # 场景列表 - 蓝图阶段已规划本章主场景, 必须传给生成阶段, 否则 LLM
+                # 看不到"本章应在哪里发生", 容易回退到上章场景, 让 Fix 1 的场景多样性
+                # 在正文生成时失守
+                scene_block = self._render_scenes_block(plan)
+                if scene_block:
+                    outline_content = f"{outline_content}\n\n{scene_block}"
                 # 支线推进 - 让 AI 在本章里真正动一动悬置的支线
                 subplot_block = self._render_subplot_progression_block(plan)
                 if subplot_block:
@@ -357,6 +363,36 @@ class OneToManyContextBuilder:
             return ""
         nodes = parse_outline_nodes(outline.structure)
         return render_nodes_for_prompt(nodes)
+
+    def _render_scenes_block(self, plan: dict) -> str:
+        """渲染本章规划的场景列表。蓝图阶段(plot_expansion)写入,生成阶段读出。
+
+        与蓝图验证关(SceneVarietyRule 校验 scenes[0].location)同源,
+        让 LLM 在写正文时也看到主场景, 不会临场切回上章场景.
+        """
+        scenes = plan.get('scenes') or []
+        if not isinstance(scenes, list):
+            return ""
+        lines: list[str] = []
+        for i, s in enumerate(scenes):
+            if not isinstance(s, dict):
+                continue
+            loc = (s.get('location') or '').strip()
+            if not loc:
+                continue
+            extras: list[str] = []
+            atm = (s.get('atmosphere') or '').strip()
+            dur = (s.get('duration') or '').strip()
+            if atm:
+                extras.append(f"氛围={atm}")
+            if dur:
+                extras.append(f"时长={dur}")
+            tail = f" ({', '.join(extras)})" if extras else ""
+            tag = "主场景" if i == 0 else f"场景{i + 1}"
+            lines.append(f"- {tag}: {loc}{tail}")
+        if not lines:
+            return ""
+        return "本章场景(必须落到正文)：\n" + "\n".join(lines)
 
     def _render_subplot_progression_block(self, plan: dict) -> str:
         """渲染本章应推进的支线列表。规划阶段(plot_expansion)写入,生成阶段读出。"""

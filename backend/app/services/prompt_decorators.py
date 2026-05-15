@@ -81,6 +81,35 @@ class MemoryScratchpadDecorator:
         return ctx
 
 
+class FactConsistencyDecorator:
+    """事实台账装饰器 - 把跨章数值/身份/物品/关系事实注入 system_prompt
+
+    数据来源: FactLedger.to_prompt_block() (由 ExtractFactStateHook 在分析后写入)
+    解决症状: "数学 48 → 数学 70" / "韩宇是同班 → 突然是隔壁班" 这类事实漂移.
+    旧反馈环只走自由文本 + 向量检索, 数值事实必然失真; 本装饰器走结构化台账.
+
+    空块自动跳过(第 1 章 / 角色无 fact_deltas 输出 / 台账查询失败).
+    """
+
+    name = "fact_consistency"
+
+    def __init__(self, ledger_block: Optional[str] = None):
+        self.block = (ledger_block or "").strip()
+
+    def _is_active(self) -> bool:
+        return bool(self.block)
+
+    def apply(self, ctx: PromptContext) -> PromptContext:
+        if not self._is_active():
+            return ctx
+        ctx.system_prompt = (
+            self.block if not ctx.system_prompt
+            else f"{ctx.system_prompt}\n\n{self.block}"
+        )
+        ctx.metadata["fact_consistency_applied"] = True
+        return ctx
+
+
 class CreativeContractDecorator:
     """创作契约装饰器 - 把项目级硬约束注入 system_prompt
 
@@ -463,64 +492,101 @@ class StoryTimelineDecorator:
 
 
 class PlotBeatCoolingDecorator:
-    """已写桥段冷却装饰器 - 防止"老师训话/对手挑衅/主角内心独白"等事件反复重演
+    """已写桥段冷却装饰器(骨架版) - 防止"老师训话/对手挑衅"等场景换皮重演
 
-    数据来源: PlotAnalysis.plot_points (由 PlotAnalyzer 在生成后写入,
-    每条含 content/type/impact/importance)
-    输入: recent_beats = [
-        {"chapter_number": 2, "content": "王启明当众点名训话", "type": "conflict"},
-        {"chapter_number": 2, "content": "赵凯阴阳怪气挑衅",  "type": "conflict"},
+    数据来源: PlotAnalysis.plot_points[i].scene_skeleton (由 PLOT_ANALYSIS 模板要求
+    LLM 抽出, 形如 {location, action_kind, role_pair_key, emotion_beat})
+    输入: recent_skeletons = [
+        {"chapter_number": 2, "location": "教室晚自习",
+         "action_kind": "训话",   "role_pair_key": "林川↔陈建国", "emotion_beat": "压制"},
         ...
     ]
 
-    解决症状: 同类事件(训话/嘲讽/独白)在 2/4/5 章原样重演 - LocationVariety
-    只防"地点循环",MotifCooling 只防"短意象词"复读,中间这层"事件桥段"
-    此前没有任何反馈环。本装饰器把最近若干章的高重要度情节点列给 LLM,
-    强制要求本章推到全新事件类型。
+    解决症状: 同骨架场景(同地点 + 同动作 + 同互动 + 同情绪)在 2/4/5/6 章反复演.
+    旧版本按 80 字 content 文本去重, LLM 改两个动词就能绕过 → 复读率高达 60%+.
+    新版本按"骨架元组"去重, 并自动检测超用维度强制切换.
+
+    向后兼容: 若 plot_points 缺 scene_skeleton 字段(旧数据),
+    _build_plot_beat_cooling_decorator 会直接跳过该条, 工厂返回 None,
+    本装饰器不进入管线.
     """
 
     name = "plot_beat_cooling"
 
     MAX_BEATS = 12
-    BLOCK_HEADER = "【🔁 已写桥段冷却 - 反复演硬约束】"
+    SKELETON_KEYS = ("location", "action_kind", "role_pair_key", "emotion_beat")
+    # 同一维度值重复 ≥ HOT_THRESHOLD 次, 标为"超用维度", 本章必须强制切换
+    HOT_THRESHOLD = 3
+    BLOCK_HEADER = "【🔁 场景骨架冷却 - 反复演硬约束】"
 
-    def __init__(self, recent_beats: Optional[list[dict]] = None):
+    def __init__(self, recent_skeletons: Optional[list[dict]] = None):
         cleaned: list[dict] = []
-        for b in recent_beats or []:
-            if not isinstance(b, dict):
+        for s in recent_skeletons or []:
+            if not isinstance(s, dict):
                 continue
-            content = (b.get("content") or "").strip()
-            if not content:
+            if not all((s.get(k) or "").strip() for k in self.SKELETON_KEYS):
                 continue
             cleaned.append({
-                "chapter_number": b.get("chapter_number"),
-                "content": content[:80],
-                "type": (b.get("type") or "").strip(),
+                "chapter_number": s.get("chapter_number"),
+                **{k: s[k].strip() for k in self.SKELETON_KEYS},
             })
-        self.recent_beats = cleaned[: self.MAX_BEATS]
+        self.recent_skeletons = cleaned[-self.MAX_BEATS:]
 
     def _is_active(self) -> bool:
-        return bool(self.recent_beats)
+        return bool(self.recent_skeletons)
+
+    def _compute_hot(self) -> dict[str, list[str]]:
+        """返回每个维度里出现次数 >= HOT_THRESHOLD 的值."""
+        from collections import Counter
+        hot: dict[str, list[str]] = {}
+        for key in self.SKELETON_KEYS:
+            counts = Counter(s[key] for s in self.recent_skeletons)
+            over = [val for val, n in counts.items() if n >= self.HOT_THRESHOLD]
+            if over:
+                hot[key] = over
+        return hot
+
+    @staticmethod
+    def _dimension_label(key: str) -> str:
+        return {
+            "location": "地点",
+            "action_kind": "动作",
+            "role_pair_key": "互动",
+            "emotion_beat": "情绪",
+        }.get(key, key)
 
     def apply(self, ctx: PromptContext) -> PromptContext:
         if not self._is_active():
             return ctx
         lines = [
             self.BLOCK_HEADER,
-            "下列情节点已在最近章节真实写过,本章必须推动到全新事件,"
-            "禁止用相同的事件类型(如反复\"老师训话/对手挑衅/主角内心回顾过往\")再演一次。",
+            "下表是最近章节实际写过的场景骨架. 本章必须至少切换其中 2 个维度,"
+            "禁止四个维度全部沿用任一历史行(那等于换皮重演同一场戏).",
+            "| 章 | 地点 | 动作 | 互动 | 情绪 |",
+            "|----|------|------|------|------|",
         ]
-        for b in self.recent_beats:
-            ch = b.get("chapter_number")
-            tag = f"第{ch}章" if ch else "近章"
-            kind = f"[{b['type']}]" if b["type"] else ""
-            lines.append(f"- {tag}{kind} {b['content']}")
+        for s in self.recent_skeletons:
+            ch = s.get("chapter_number") or "?"
+            lines.append(
+                f"| {ch} | {s['location']} | {s['action_kind']} "
+                f"| {s['role_pair_key']} | {s['emotion_beat']} |"
+            )
+        hot = self._compute_hot()
+        if hot:
+            hot_desc = "; ".join(
+                f"{self._dimension_label(k)}={'/'.join(vals)}"
+                for k, vals in hot.items()
+            )
+            lines.append(
+                f"⚠️ 超用维度(出现 ≥ {self.HOT_THRESHOLD} 次, 本章必须强制更换): {hot_desc}"
+            )
         block = "\n".join(lines)
         ctx.system_prompt = (
             block if not ctx.system_prompt
             else f"{ctx.system_prompt}\n\n{block}"
         )
         ctx.metadata["plot_beat_cooling_applied"] = True
+        ctx.metadata["plot_beat_cooling_count"] = len(self.recent_skeletons)
         return ctx
 
 
@@ -628,6 +694,7 @@ class PromptPipeline:
         chapter_brief: Optional[ChapterBrief] = None,
         scratchpad_text: Optional[str] = None,
         style_pattern_text: Optional[str] = None,
+        fact_consistency: Optional["FactConsistencyDecorator"] = None,
         character_arc: Optional["CharacterArcDecorator"] = None,
         narrator_voice: Optional["NarratorVoiceDecorator"] = None,
         motif_cooling: Optional["MotifCoolingDecorator"] = None,
@@ -645,15 +712,16 @@ class PromptPipeline:
          4. VolumeBriefDecorator        - 卷级约束
          5. ChapterBriefDecorator       - 章级约束
          6. MemoryScratchpadDecorator   - 当前剧情快照
-         7. CharacterArcDecorator       - 角色心境/关系演进(来自 PlotAnalysis)
-         8. NarratorVoiceDecorator      - 主角声音年龄/时代硬约束
-         9. MotifCoolingDecorator       - 已用意象冷却 / 禁用
-        10. LocationVarietyDecorator    - 地点轮换硬约束(来自 PlotAnalysis)
-        11. PlotBeatCoolingDecorator    - 已写桥段冷却(来自 PlotAnalysis.plot_points)
-        12. StoryTimelineDecorator      - 故事内时间锚(来自 expansion_plan.story_time_*)
-        13. PacingMilestoneDecorator    - 卷级节奏里程碑(来自 VolumeBrief.pacing_milestones)
-        14. AntiAIFlavorDecorator       - 反 AI 味(句法 + 结构两组规则)
-        15. OutputFormatDecorator       - 输出指令
+         7. FactConsistencyDecorator    - 跨章数值/身份事实台账(来自 FactLedger)
+         8. CharacterArcDecorator       - 角色心境/关系演进(来自 PlotAnalysis)
+         9. NarratorVoiceDecorator      - 主角声音年龄/时代硬约束
+        10. MotifCoolingDecorator       - 已用意象冷却 / 禁用
+        11. LocationVarietyDecorator    - 地点轮换硬约束(来自 PlotAnalysis)
+        12. PlotBeatCoolingDecorator    - 已写桥段冷却(来自 PlotAnalysis.plot_points)
+        13. StoryTimelineDecorator      - 故事内时间锚(来自 expansion_plan.story_time_*)
+        14. PacingMilestoneDecorator    - 卷级节奏里程碑(来自 VolumeBrief.pacing_milestones)
+        15. AntiAIFlavorDecorator       - 反 AI 味(句法 + 结构两组规则)
+        16. OutputFormatDecorator       - 输出指令
         """
         decorators: list[PromptDecorator] = []
         if style_content:
@@ -668,6 +736,8 @@ class PromptPipeline:
             decorators.append(ChapterBriefDecorator(chapter_brief))
         if scratchpad_text:
             decorators.append(MemoryScratchpadDecorator(scratchpad_text))
+        if fact_consistency is not None and fact_consistency._is_active():
+            decorators.append(fact_consistency)
         if character_arc is not None and character_arc._is_active():
             decorators.append(character_arc)
         if narrator_voice is not None and narrator_voice._is_active():

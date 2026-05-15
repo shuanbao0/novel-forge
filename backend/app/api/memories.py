@@ -485,16 +485,18 @@ async def delete_chapter_memories(
     """删除章节的所有记忆"""
     try:
         user_id = getattr(request.state, 'user_id', None)
-        
+
         # 验证用户权限
         await verify_project_access(project_id, user_id, db)
-        
-        # 从数据库删除
+
+        # 从数据库删除 - 排除项目级类型 (fact_ledger/used_motif) 防止误伤
+        from app.repositories.fact_ledger_repo import PROJECT_SCOPED_MEMORY_TYPES
         result = await db.execute(
             select(StoryMemory).where(
                 and_(
                     StoryMemory.project_id == project_id,
-                    StoryMemory.chapter_id == chapter_id
+                    StoryMemory.chapter_id == chapter_id,
+                    ~StoryMemory.memory_type.in_(PROJECT_SCOPED_MEMORY_TYPES),
                 )
             )
         )

@@ -71,7 +71,10 @@ class ChapterRegenerator:
             logger.info(f"🎯 提示词构建完成，开始AI生成")
             yield {'type': 'progress', 'progress': 15, 'message': '开始AI生成内容...'}
             
-            # 3. 构建系统提示词（注入写作风格）
+            # 3. 构建系统提示词（注入写作风格 + 走章节生成 PromptPipeline 拿全套装饰器）
+            # 历史问题: 整章重写曾经只注入 style_content, 完全绕过 PromptPipeline,
+            # 导致 fact_ledger / plot_beat_cooling / story_timeline 等所有反馈环失效.
+            # 现在与正常生成路径共用同一管线, 装饰器空数据会自动跳过(对老项目兼容).
             system_prompt_with_style = None
             if style_content:
                 system_prompt_with_style = f"""【🎨 写作风格要求 - 最高优先级】
@@ -81,6 +84,25 @@ class ChapterRegenerator:
 ⚠️ 请严格遵循上述写作风格要求进行重写，这是最重要的指令！
 确保在整个章节重写过程中始终保持风格的一致性。"""
                 logger.info(f"✅ 已将写作风格注入系统提示词（{len(style_content)}字符）")
+
+            # 叠加完整的 PromptPipeline 装饰(契约 / 事实台账 / 场景骨架冷却 / 时间锚 / ...)
+            if db is not None:
+                try:
+                    pipeline_system_prompt = await self._build_pipeline_system_prompt(
+                        chapter=chapter, db=db, style_content=style_content,
+                    )
+                    if pipeline_system_prompt:
+                        system_prompt_with_style = (
+                            pipeline_system_prompt if not system_prompt_with_style
+                            else f"{system_prompt_with_style}\n\n{pipeline_system_prompt}"
+                        )
+                        logger.info(
+                            f"✅ 重写路径已注入 PromptPipeline 装饰器系统约束"
+                            f"({len(pipeline_system_prompt)}字符)"
+                        )
+                except Exception as exc:
+                    # 失败容忍: 装饰器构建失败不阻塞重写, 退化为只用 style_content
+                    logger.warning(f"⚠️ 重写路径 PromptPipeline 装配失败(跳过): {exc}")
             
             # 4. 流式生成新内容，同时跟踪进度
             target_word_count = regenerate_request.target_word_count
@@ -178,6 +200,45 @@ class ChapterRegenerator:
         
         return "\n".join(instructions)
     
+    async def _build_pipeline_system_prompt(
+        self,
+        chapter: Chapter,
+        db: AsyncSession,
+        style_content: str,
+    ) -> str:
+        """让重写路径复用正常生成路径的 PromptPipeline.
+
+        加载 project + outline → 调用 build_decorated_chapter_pipeline → 跑空 PromptContext
+        → 拿到 system_prompt 部分(契约 / 事实台账 / 场景骨架冷却 / 时间锚等).
+
+        失败时返回空串, 调用方据此降级.
+        """
+        from sqlalchemy import select
+        from app.models.outline import Outline
+        from app.models.project import Project
+        from app.services.chapter_prompt_builder import build_decorated_chapter_pipeline
+        from app.services.prompt_decorators import PromptContext
+
+        project = (await db.execute(
+            select(Project).where(Project.id == chapter.project_id)
+        )).scalar_one_or_none()
+        if project is None:
+            return ""
+        outline = None
+        if chapter.outline_id:
+            outline = (await db.execute(
+                select(Outline).where(Outline.id == chapter.outline_id)
+            )).scalar_one_or_none()
+
+        pipeline = await build_decorated_chapter_pipeline(
+            db=db, project=project, outline=outline, chapter=chapter,
+            style_content=None,    # style 已经在外层手动注入, 这里不重复
+            anti_ai_enabled=True,
+        )
+        # 用空 user_prompt 跑一遍 pipeline, 只取 system_prompt 副产物
+        ctx = pipeline.run(PromptContext(user_prompt=""))
+        return (ctx.system_prompt or "").strip()
+
     async def _build_regeneration_prompt(
         self,
         chapter: Chapter,

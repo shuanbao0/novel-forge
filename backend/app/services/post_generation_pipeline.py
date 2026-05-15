@@ -204,6 +204,11 @@ class ChapterReviewHook:
         logger.info(f"⏳ 已调度章节审稿任务: chapter={ctx.chapter_id}")
 
 
+"""事实台账投影现在由 analyze_chapter_background 内部统一调用
+(services/fact_ledger_projection.project_fact_state),
+SSE 与批量两路径都自动覆盖, 这里不再需要单独的 Hook."""
+
+
 class CreateChapterCommitHook:
     """章节快照 Hook - 写入不可变 commit 记录(Phase 7)
 
@@ -648,6 +653,7 @@ class PostGenPipeline:
         - TitleRegeneration: 改 chapter.title, 让后续分析 / 下章上下文用上新标题
         - MotifExtraction: 不阻塞主流程, 失败容忍, 但其结果影响下一章 prompt
         - CreateAnalysisTask + ScheduleAnalysis: 分析后台跑
+          (事实台账投影由 analyze_chapter_background 内部统一处理, 无需独立 Hook)
         - ChapterReview: 审稿后台跑
         """
         return cls([
@@ -666,11 +672,14 @@ class PostGenPipeline:
 
         与 default() 的关键差异:
         - 用 SyncAnalyzeHook 替换 ScheduleAnalysisHook,把分析改为同步阻塞,
-          保证下一章生成时能读到本章的分析结果(职业更新/记忆投影)
+          保证下一章生成时能读到本章的分析结果(职业更新/记忆投影/事实台账)
         - SyncAnalyzeHook 注册到 raise_on_error,分析失败会中断整批
 
+        事实台账投影在 analyze_chapter_background 内部跑, 两条路径都覆盖,
+        所以这里不再需要 ExtractFactState 这一独立 Hook.
+
         当 enable_analysis=False 时只做伏笔埋入 + 快照 + 标题 + 意象去重,
-        跳过分析与审稿。
+        跳过分析、台账与审稿。
         """
         if not enable_analysis:
             return cls([

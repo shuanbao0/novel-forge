@@ -21,6 +21,7 @@ from app.services.creative_contract import (
 )
 from app.services.prompt_decorators import (
     CharacterArcDecorator,
+    FactConsistencyDecorator,
     LocationVarietyDecorator,
     MotifCoolingDecorator,
     NarratorVoiceDecorator,
@@ -247,26 +248,53 @@ async def _build_location_variety_decorator(
     return LocationVarietyDecorator(recent_locations=locations)
 
 
+async def _build_fact_consistency_decorator(
+    db: AsyncSession,
+    project_id: str,
+) -> Optional[FactConsistencyDecorator]:
+    """从 FactLedgerRepository 加载项目级事实台账, 构造装饰器.
+
+    空台账 / 第 1 章前 / 仓储异常 → 返回 None, 装饰器管线无感跳过.
+    """
+    try:
+        from app.repositories.fact_ledger_repo import FactLedgerRepository
+        ledger = await FactLedgerRepository(db).get(project_id)
+    except Exception as exc:
+        logger.warning(f"⚠️ 事实台账读取失败(跳过): {exc}")
+        return None
+    block = ledger.to_prompt_block()
+    if not block:
+        return None
+    return FactConsistencyDecorator(ledger_block=block)
+
+
 async def _build_plot_beat_cooling_decorator(
     db: AsyncSession,
     project_id: str,
     chapter_number: int,
 ) -> Optional[PlotBeatCoolingDecorator]:
-    """从最近 5 章 PlotAnalysis.plot_points 抽事件桥段,构造装饰器。
+    """从最近 5 章 PlotAnalysis.plot_points[i].scene_skeleton 构造装饰器。
 
-    数据契约: PlotAnalyzer 写入的 plot_points 形如
-        [{"content": "...", "type": "...", "importance": 0.9, "impact": "..."}]
-    本函数只取 importance >= 0.6 的"高重要度桥段",每章最多 4 条,
-    避免 prompt 注入过长稀释主任务。
+    数据契约: PLOT_ANALYSIS 模板要求 LLM 在每个 plot_point 内嵌 scene_skeleton:
+        {"location": "...", "action_kind": "训话|对峙|...",
+         "role_pair_key": "a↔b", "emotion_beat": "压制|和解|..."}
+    importance < 0.6 的 plot_point 也保留(低强度场景同样会被复读),
+    PER_CHAPTER_CAP 限制每章最多 3 条骨架以控制 prompt 长度.
 
-    无数据 / 第一章 / 查询失败 时返回 None,管线无感跳过。
+    枚举归一化: LLM 不会严格遵守 7/6 个枚举值, 经常输出"训诫/质问"等近义词,
+    通过 scene_skeleton_normalize 模块映射回规范值, 让"训诫"和"训话"被
+    PlotBeatCoolingDecorator._compute_hot() 当作同一维度累计计数.
+    role_pair_key 也做字典序归一化, 防止"a↔b"与"b↔a"被当成两对.
+
+    向后兼容: 旧 plot_points 缺 scene_skeleton 时整条跳过, 全部跳过则返回 None,
+    管线无感关闭, 不会回退到旧的"文本去重"误判模式.
     """
     if chapter_number <= 1:
         return None
     try:
         analyses = await _fetch_recent_plot_analyses(db, project_id, chapter_number, lookback=5)
     except Exception as exc:
-        logger.warning(f"⚠️ 已写桥段读取失败(跳过): {exc}")
+        logger.warning(f"⚠️ 场景骨架读取失败(跳过): {exc}")
         return None
     if not analyses:
         return None
@@ -275,6 +303,9 @@ async def _build_plot_beat_cooling_decorator(
     from sqlalchemy import select
     from app.models.chapter import Chapter
     from app.models.memory import PlotAnalysis
+    from app.services.scene_skeleton_normalize import (
+        normalize_action_kind, normalize_emotion_beat, normalize_role_pair_key,
+    )
 
     lower = max(1, chapter_number - 5)
     q = await db.execute(
@@ -287,8 +318,8 @@ async def _build_plot_beat_cooling_decorator(
     for pid, ch_num in q.all():
         pa_to_chapter[pid] = ch_num
 
-    beats: list[dict] = []
-    PER_CHAPTER_CAP = 4
+    skeletons: list[dict] = []
+    PER_CHAPTER_CAP = 3
     for pa in analyses:
         ch_num = pa_to_chapter.get(pa.id)
         points = pa.plot_points or []
@@ -298,22 +329,28 @@ async def _build_plot_beat_cooling_decorator(
         for p in points:
             if not isinstance(p, dict):
                 continue
-            if (p.get("importance") or 0) < 0.6:
+            skel = p.get("scene_skeleton")
+            if not isinstance(skel, dict):
                 continue
-            content = (p.get("content") or "").strip()
-            if not content:
+            location = (skel.get("location") or "").strip()
+            action = normalize_action_kind(skel.get("action_kind"))
+            pair = normalize_role_pair_key(skel.get("role_pair_key"))
+            emotion = normalize_emotion_beat(skel.get("emotion_beat"))
+            if not (location and action and pair and emotion):
                 continue
-            beats.append({
+            skeletons.append({
                 "chapter_number": ch_num,
-                "content": content,
-                "type": (p.get("type") or "").strip(),
+                "location": location,
+                "action_kind": action,
+                "role_pair_key": pair,
+                "emotion_beat": emotion,
             })
             kept += 1
             if kept >= PER_CHAPTER_CAP:
                 break
-    if not beats:
+    if not skeletons:
         return None
-    return PlotBeatCoolingDecorator(recent_beats=beats)
+    return PlotBeatCoolingDecorator(recent_skeletons=skeletons)
 
 
 async def _build_motif_cooling_decorator(
@@ -458,6 +495,7 @@ async def build_decorated_chapter_pipeline(
     motif_cooling = await _build_motif_cooling_decorator(
         db, project.id, chapter.chapter_number
     )
+    fact_consistency = await _build_fact_consistency_decorator(db, project.id)
     character_arc = await _build_character_arc_decorator(
         db, project.id, chapter.chapter_number
     )
@@ -482,6 +520,7 @@ async def build_decorated_chapter_pipeline(
         chapter_brief=chapter_brief,
         scratchpad_text=scratchpad_text,
         style_pattern_text=style_pattern_text,
+        fact_consistency=fact_consistency,
         character_arc=character_arc,
         narrator_voice=narrator_voice,
         motif_cooling=motif_cooling,

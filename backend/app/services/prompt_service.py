@@ -415,12 +415,17 @@ class PromptService:
 <constraints>
 【开篇大纲要求】
 ✅ 开局设定：前几章完成世界观呈现、主角登场、初始状态
-✅ 矛盾引入：引出核心冲突，但不急于展开
+✅ 矛盾引入：引出核心冲突，并通过具体事件推进, 不要只停留在"暗示"
 ✅ 角色亮相：主要角色依次登场，展示性格和关系
-✅ 节奏控制：开篇不宜过快，给读者适应时间
 ✅ 悬念设置：埋下伏笔和钩子，为续写预留空间
 ✅ 视角统一：采用{narrative_perspective}视角
-✅ 留白艺术：结尾不收束过紧，留发展空间
+
+【场景与时间硬约束 - 防止大纲节点全部塞进同一场景】
+✅ 每章 scenes 数组的第一个元素必须是"具体到地点"的主场景描述
+   (如 "教室晚自习"/"校门口小摊"), 不要写 "学校"/"家里" 这种泛指
+✅ {chapter_count} 个开篇章节的"主场景描述首关键词"至少有 ⌈{chapter_count}/2⌉ 个唯一值,
+   严禁全部塞进同一场景(例: 全章都在重生当晚的教室)
+✅ 故事内时间需要明显推进, 不要把多章都设在同一时段(同一天 / 同一节自习)
 
 【必须遵守】
 ✅ 数量精确：数组包含{chapter_count}个章节对象
@@ -433,7 +438,7 @@ class PromptService:
 ❌ 输出markdown或代码块标记
 ❌ 在描述中使用特殊符号
 ❌ 试图在开篇完结故事
-❌ 节奏过快，信息过载
+❌ 同一场景同一时段反复出现, 让多章在原地踏步
 </constraints>"""
     
     # 大纲续写提示词 V2（RTCO框架 - 简化版）
@@ -1196,6 +1201,16 @@ class PromptService:
   - 仅当章节明确描述角色与组织关系变化时填写
   - organization_changes: 组织变动数组
   - 每项包含：organization_name(组织名)、change_type(加入joined/离开left/晋升promoted/降级demoted/开除expelled/叛变betrayed)、new_position(新职位，可选)、loyalty_change(忠诚度变化描述，可选)、description(变化描述)
+- **🧾 事实增量 fact_deltas（必填, 如本章对该角色涉及任一变更）**：
+  跨章数值/身份漂移的真正解药. 本字段会被 ExtractFactStateHook 抽出后合入项目级事实台账,
+  下一章生成时通过 FactConsistencyDecorator 反馈给模型, 防止 "数学 48 → 数学 70" 这类幻觉.
+  仅当章节正文里能找到逐字依据时填写, 严禁臆造.
+  - scores: 数值类事实, 键名要具体. 例: {{"三模数学": 48, "高考总分": 327, "月薪": 3000}}
+  - inventory: 角色本章长期获得/失去的物品. 例: ["旧诺基亚", "账本草稿纸"]
+  - identities: 角色本章首次确认/变更的身份. 例: ["云江三中高三七班", "云川时代创始人"]
+  - relationships: 角色对其他人物的关系状态(简短关键词). 例: {{"韩宇": "对立", "苏晚晴": "暗恋"}}
+  - force_overwrite: 默认 false(已有值不覆盖, 安全策略). 仅当确实"剧情上推翻旧值"时设 true
+    (例如三模 → 高考真分 / 升职后职位变化)
 
 **5b. 组织状态追踪 (Organization Status) - 可选**
 仅当章节涉及组织势力变化时填写，分析出场组织的状态变化：
@@ -1216,6 +1231,11 @@ class PromptService:
 - 重要性(0.0-1.0)
 - 对故事的影响
 - **关键词**：【必填】从原文逐字复制8-25字
+- **scene_skeleton**：【必填】场景骨架,用于跨章去重,只有结构化骨架后续才能识别"换皮重演"
+  - location: 物理场景(具体,如"教室晚自习"/"校门口小摊";不要写"学校"/"家里"这种泛指)
+  - action_kind: 必须从这 7 个枚举值选一——训话/对峙/接触/独白/回忆/转移/调查
+  - role_pair_key: 主要互动双方,统一格式 "a↔b"(按字符串字典序排列,小的在前);独白时填 "a↔自我";多人场景取最核心的一对
+  - emotion_beat: 必须从这 6 个枚举值选一——压制/和解/冲突/疏离/亲近/觉醒
 
 **7. 场景与节奏**
 - 主要场景
@@ -1353,7 +1373,14 @@ class PromptService:
           "loyalty_change": "忠诚度提升",
           "description": "因立下大功被提拔为长老"
         }}
-      ]
+      ],
+      "fact_deltas": {{
+        "scores": {{"三模数学": 48}},
+        "inventory": ["旧练习册"],
+        "identities": ["云江三中高三七班"],
+        "relationships": {{"韩宇": "对立"}},
+        "force_overwrite": false
+      }}
     }}
   ],
   "plot_points": [
@@ -1362,7 +1389,13 @@ class PromptService:
       "type": "revelation",
       "importance": 0.9,
       "impact": "推动故事发展",
-      "keyword": "从原文逐字复制的8-25字文本"
+      "keyword": "从原文逐字复制的8-25字文本",
+      "scene_skeleton": {{
+        "location": "教室晚自习",
+        "action_kind": "训话",
+        "role_pair_key": "林川↔陈建国",
+        "emotion_beat": "压制"
+      }}
     }}
   ],
   "scenes": [
@@ -1416,6 +1449,19 @@ class PromptService:
 ✅ suggestions 的正确格式示例："suggestions": ["【节奏问题】...", "【描写不足】..."]
 ✅ suggestions 中禁止返回对象、字典、键值对或嵌套结构，例如禁止 {{"suggestion": "..."}}、{{"content": "..."}}
 ✅ 如果没有改进建议，必须返回空数组 []，不要返回 null，不要省略字段
+
+【🔁 跨章一致性约束 - 必填字段 (不填会导致下章生成质量降级)】
+✅ scene_skeleton 必填: 每个 plot_point 都必须给出完整的 4 维骨架
+   {location, action_kind, role_pair_key, emotion_beat}, 字段缺一不可.
+   - action_kind 严格从枚举选: 训话/对峙/接触/独白/回忆/转移/调查
+   - emotion_beat 严格从枚举选: 压制/和解/冲突/疏离/亲近/觉醒
+   - role_pair_key 统一格式 "a↔b" (字典序), 独白时填 "a↔自我"
+   缺骨架的 plot_point 会让下章无法识别"换皮重演同一场戏"
+✅ fact_deltas 必填(如本章涉及任一变更): 凡章节中出现具体分数/金钱/年龄/物品/身份/关系变化,
+   都必须在对应角色的 character_states[i].fact_deltas 中提交.
+   - 同一角色本章首次确定的事实, force_overwrite 留 false (安全默认)
+   - 推翻旧值的事实(例: 三模 48 → 高考 110), 必须显式 force_overwrite=true
+   - 本章无任何变更才允许省略 fact_deltas; 不要为了省事跳过这个字段
 
 【评分约束 - 严格执行】
 ✅ 严格按评分标准打分，支持小数（如6.5、7.2、8.3）
@@ -1515,7 +1561,9 @@ class PromptService:
     "emotional_tone": "情感基调（如：紧张、温馨、悲伤）",
     "narrative_goal": "叙事目标（该章要达成的叙事效果）",
     "conflict_type": "冲突类型（如：内心挣扎、人际冲突）",
-    "estimated_words": <根据本章重要性在 1500-5000 之间取整数，参见下方节奏分配硬约束>{subplot_field}{scene_field}
+    "estimated_words": <根据本章重要性在 1500-5000 之间取整数，参见下方节奏分配硬约束>,
+    "story_time_anchor": "本章故事内时间(具体到时段，如 '重生当日下午第二节自习'/'高考前29天清晨'/'次日傍晚')",
+    "story_time_advance": "相对上一章推进的时间跨度(如 '紧接上章'/'约 3 小时后'/'次日'/'一周后')"{subplot_field}{scene_field}
   }}
 ]
 
@@ -1524,14 +1572,26 @@ class PromptService:
 - 内容描述中严禁使用特殊符号
 - character_beats 必须覆盖 character_focus 中的每个角色,beat 描述具体行动/心境而非静态性格
 - estimated_words 必须是 1500-5000 之间的整数,严禁所有章节填同一个值
+- story_time_anchor 必须给出具体时段(不能是"某一天"这种模糊词),为下章提供时间衔接基准
+- story_time_advance 必须与 plot_summary 描述的时间跨度自洽,严禁本章只发生半小时却让下章跳到"几周后"
 </output>
 
 <constraints>
 【⚠️ 内容边界约束 - 必须严格遵守】
-✅ 只能展开当前大纲节点的内容
-✅ 深化当前大纲，而非跨越到后续
-✅ 放慢叙事节奏，充分体验当前阶段
+✅ 只能展开当前大纲节点的内容, 不要推进到后续大纲
+✅ 深化当前大纲, 而非跨越到后续节点
 {subplot_directive}
+{scene_instruction}
+
+【🚦 推进硬约束 - 蓝图落库前会自动验证, 不达标会被打回重写】
+✅ 主场景多样性: 本批 N 章中, scenes[0].location 唯一值数 ≥ ⌈N/3⌉
+  (例 6 章至少 2 个主场景; 10 章至少 4 个主场景)
+✅ 故事内时间推进: story_time_advance 含"紧接/同一/立刻/随即/片刻/稍后"的章节
+  数量不得超过总章数的 2/3
+✅ key_events 跨章去重: 相同短语在不同章 key_events 中的重复占比要低,
+  严禁多数章节的 key_events 高度相似
+❌ 严禁让整个批次只发生在同一场景同一时段(例如"全章都在晚自习教室")
+❌ 严禁所有 story_time_advance 都填"紧接上章"
 
 【📏 节奏分配硬约束 - estimated_words 必须有起伏】
 ✅ 高潮/对决/重大转折章: 4000-5000 字
@@ -1541,14 +1601,12 @@ class PromptService:
 ❌ 严禁所有章节都填 3000 这种"平均值"——这会让读者觉得节奏死板
 ❌ 严禁连续 3 章字数完全一致
 
-❌ 绝对不能推进到后续大纲内容
-❌ 不要让剧情快速推进
-❌ 不要提前展开【后一节】的内容
-
 【展开原则】
 ✅ 将单一事件拆解为多个细节丰富的章节
 ✅ 深入挖掘情感、心理、环境、对话
 ✅ 每章是当前大纲内容的不同侧面或阶段
+✅ 通过切换场景 / 推进故事内时间 / 引入新角色互动来制造节奏起伏,
+  而不是把同一场戏写慢
 
 【🔴 相邻章节差异化约束（防止重复）】
 ✅ 每章有独特的开场方式（不同场景、时间点、角色状态）
@@ -1676,13 +1734,19 @@ class PromptService:
 
 <constraints>
 【⚠️ 内容边界约束】
-✅ 只能展开当前大纲节点的内容
-✅ 深化当前大纲，而非跨越到后续
-✅ 放慢叙事节奏
-
-❌ 绝对不能推进到后续大纲内容
-❌ 不要让剧情快速推进
+✅ 只能展开当前大纲节点的内容, 不要推进到后续大纲
+✅ 深化当前大纲, 而非跨越到后续节点
 {subplot_directive}
+{scene_instruction}
+
+【🚦 推进硬约束 - 蓝图落库前会自动验证, 不达标会被打回重写】
+✅ 主场景多样性: 本批 N 章中, scenes[0].location 唯一值数 ≥ ⌈N/3⌉
+  (例 5 章至少 2 个主场景; 10 章至少 4 个主场景)
+✅ 故事内时间推进: story_time_advance 含"紧接/同一/立刻/随即/片刻/稍后"的章节
+  数量不得超过总章数的 2/3
+✅ key_events 跨章去重: 严禁多数章节的 key_events 高度相似(同短语反复出现)
+❌ 严禁让整个批次只发生在同一场景同一时段
+❌ 严禁所有 story_time_advance 都填"紧接上章"
 
 【📏 节奏分配硬约束 - estimated_words 必须有起伏】
 ✅ 高潮/对决/重大转折章: 4000-5000 字
@@ -1707,7 +1771,7 @@ class PromptService:
 【章节间要求】
 ✅ 与前面章节衔接自然流畅
 ✅ 剧情递进合理（但不超出当前大纲边界）
-✅ 节奏张弛有度
+✅ 节奏张弛有度,通过切换场景/推进时间制造起伏,而不是把同一场戏写慢
 ✅ 每章有明确且独特的叙事价值
 ✅ 关键事件无重叠：检查本批次和前序章节的key_events
 
@@ -2989,6 +3053,43 @@ class PromptService:
         # 尝试获取用户自定义模板
         return await cls.get_template(template_key, user_id, db)
     
+    # 自定义模板兼容性检查 - 仅做一次警告, 防止每次调用刷日志
+    # key = (user_id, template_key), value = True 表示已警告过
+    _CUSTOM_TEMPLATE_COMPAT_WARNED: dict[tuple[str, str], bool] = {}
+
+    # 不同模板必须包含的"质量修复标记字符串", 缺则提示用户升级
+    _TEMPLATE_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
+        "PLOT_ANALYSIS": ("scene_skeleton", "fact_deltas"),
+        "OUTLINE_EXPAND_MULTI": ("scenes[0].location", "story_time_advance"),
+        "OUTLINE_EXPAND_SINGLE": ("story_time_advance",),
+    }
+
+    @classmethod
+    def _warn_outdated_custom_template(
+        cls,
+        user_id: str,
+        template_key: str,
+        template_content: str,
+    ) -> None:
+        """检查用户自定义模板是否缺少质量修复要求的字段, 缺则一次性警告."""
+        required = cls._TEMPLATE_REQUIRED_TOKENS.get(template_key)
+        if not required:
+            return
+        missing = [tok for tok in required if tok not in (template_content or "")]
+        if not missing:
+            return
+        cache_key = (user_id, template_key)
+        if cls._CUSTOM_TEMPLATE_COMPAT_WARNED.get(cache_key):
+            return
+        cls._CUSTOM_TEMPLATE_COMPAT_WARNED[cache_key] = True
+        from app.logger import get_logger
+        get_logger(__name__).warning(
+            f"⚠️ 用户自定义模板 {template_key} 缺少质量修复字段: "
+            f"{missing} (user_id={user_id}). "
+            f"建议在提示词工坊重新克隆系统默认模板, "
+            f"否则跨章场景去重 / 事实台账 / 蓝图验证关将不生效."
+        )
+
     @classmethod
     async def get_template(cls,
                           template_key: str,
@@ -2996,21 +3097,21 @@ class PromptService:
                           db) -> str:
         """
         获取提示词模板（优先用户自定义）
-        
+
         Args:
             template_key: 模板键名
             user_id: 用户ID
             db: 数据库会话
-            
+
         Returns:
             提示词模板内容
         """
         from sqlalchemy import select
         from app.models.prompt_template import PromptTemplate
         from app.logger import get_logger
-        
+
         logger = get_logger(__name__)
-        
+
         # 1. 尝试从数据库获取用户自定义模板
         result = await db.execute(
             select(PromptTemplate).where(
@@ -3020,20 +3121,23 @@ class PromptService:
             )
         )
         custom_template = result.scalar_one_or_none()
-        
+
         if custom_template:
             logger.info(f"✅ 使用用户自定义提示词: user_id={user_id}, template_key={template_key}, template_name={custom_template.template_name}")
+            cls._warn_outdated_custom_template(
+                user_id, template_key, custom_template.template_content,
+            )
             return custom_template.template_content
-        
+
         # 2. 降级到系统默认模板
         logger.info(f"⚪ 使用系统默认提示词: user_id={user_id}, template_key={template_key} (未找到自定义模板)")
-        
+
         # 直接从类属性获取系统默认模板
         template_content = getattr(cls, template_key, None)
-        
+
         if template_content is None:
             logger.warning(f"⚠️ 未找到系统默认模板: {template_key}")
-        
+
         return template_content
     
     @classmethod

@@ -627,15 +627,27 @@ async def cleanup_chapter_derived_data(
         logger.warning(f"⚠️ 重写前清理伏笔失败 [chapter={chapter_id[:8]}]: {e}")
 
     # 3. 关系库衍生表
+    # StoryMemory 的清理要排除项目级数据(fact_ledger 等), 这类行的 chapter_id 只是
+    # "最近合并的章节 id" 标记, 不代表归属那一章. 直接按 chapter_id 删会把
+    # 整个项目的事实台账抹掉(只要 ledger 上次合并的恰好是本章), 这是已知 bug.
+    from app.repositories.fact_ledger_repo import PROJECT_SCOPED_MEMORY_TYPES
     deletions = [
-        (StoryMemory, "story_memories"),
-        (ChapterReview, "chapter_reviews"),
-        (AnalysisTask, "analysis_tasks"),
-        (PlotAnalysis, "plot_analysis"),  # 最后删, 让伏笔服务先用上它
+        (
+            StoryMemory,
+            "story_memories",
+            delete(StoryMemory)
+            .where(StoryMemory.chapter_id == chapter_id)
+            .where(~StoryMemory.memory_type.in_(PROJECT_SCOPED_MEMORY_TYPES)),
+        ),
+        (ChapterReview, "chapter_reviews",
+         delete(ChapterReview).where(ChapterReview.chapter_id == chapter_id)),
+        (AnalysisTask, "analysis_tasks",
+         delete(AnalysisTask).where(AnalysisTask.chapter_id == chapter_id)),
+        (PlotAnalysis, "plot_analysis",  # 最后删, 让伏笔服务先用上它
+         delete(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)),
     ]
-    for Model, label in deletions:
+    for Model, label, stmt in deletions:
         try:
-            stmt = delete(Model).where(Model.chapter_id == chapter_id)
             result = await db.execute(stmt)
             count = result.rowcount or 0
             if count > 0:
@@ -1256,15 +1268,20 @@ async def analyze_chapter_background(
         )
         
         # 先删除该章节的旧记忆（写操作，需要锁）
+        # ⚠️ 必须排除项目级 memory_type (fact_ledger / used_motif): 这两类逻辑上
+        # 不归属单章, 重分析章节不应清除它们. 集合定义在 fact_ledger_repo.
+        from app.repositories.fact_ledger_repo import PROJECT_SCOPED_MEMORY_TYPES
         async with write_lock:
             old_memories_result = await db_session.execute(
-                select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
+                select(StoryMemory)
+                .where(StoryMemory.chapter_id == chapter_id)
+                .where(~StoryMemory.memory_type.in_(PROJECT_SCOPED_MEMORY_TYPES))
             )
             old_memories = old_memories_result.scalars().all()
             for old_mem in old_memories:
                 await db_session.delete(old_mem)
             await db_session.commit()
-            logger.info(f"  删除旧记忆: {len(old_memories)}条")
+            logger.info(f"  删除旧记忆: {len(old_memories)}条 (已排除项目级台账)")
         
         # 准备批量添加的记忆数据（不需要锁）
         memory_records = []
@@ -1383,7 +1400,24 @@ async def analyze_chapter_background(
             except Exception as state_error:
                 # 角色状态更新失败不应影响整个分析流程
                 logger.error(f"⚠️ 更新角色状态、关系和组织失败: {str(state_error)}", exc_info=True)
-        
+
+        # 📓 事实台账投影（数值/身份/物品/关系跨章一致性）
+        # 单 project 单台账, 合并语义"已有不覆盖"防 LLM 抽错把对的覆盖掉.
+        # 在 SSE / 批量两条路径都生效, 因为本函数是统一入口.
+        try:
+            from app.services.fact_ledger_projection import project_fact_state
+            async with write_lock:
+                await project_fact_state(
+                    db=db_session,
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    chapter_number=chapter.chapter_number,
+                    character_states=analysis_result.get('character_states'),
+                )
+        except Exception as ledger_error:
+            # 内部已 try/except, 这里再兜一层只是防御 import 异常
+            logger.error(f"⚠️ 事实台账投影外层异常(忽略): {ledger_error}")
+
         # 🏛️ 更新组织自身状态（根据分析结果）
         if analysis_result.get('organization_states'):
             try:
